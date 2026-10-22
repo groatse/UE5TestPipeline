@@ -28,3 +28,30 @@ max_frames = 3
 # Only frames over budget count as hitch frames, so small relative spikes at
 # low frame times are ignored.
 require_over_budget = true
+
+[causes]
+# How many causes to keep per hitch or overrun.
+top = 5
+# In-budget frames sampled across the run as the baseline for each timer.
+baseline_frames = 30
+# Upper limit on over-budget frames read from the trace; beyond it they are
+# sampled evenly and the gains are scaled up to the full count.
+max_frames = 150
+# Frames this early in the capture are not used as baseline (startup).
+skip_start_s = 2.0
+# Rises smaller than this are ignored.
+min_rise_ms = 0.05
+# Timers that measure waiting rather than work. They show where a thread
+# stalled, not what to optimize, so they are never named as causes.
+ignore = [
+  "*Wait*",
+  "*wait*",
+  "*Idle*",
+  "*idle*",
+  "*Present*",
+  "*Sleep*",
+  "Oversubscription",
+  "*LookingForWork*",
+  "FEngineLoop::Tick",
+  "Frame",
+]

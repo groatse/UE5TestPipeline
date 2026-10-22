@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 
@@ -19,6 +19,12 @@ class Thresholds:
     hitch_min_window_frames: int = 10
     hitch_max_frames: int = 3
     hitch_require_over_budget: bool = True
+    causes_top: int = 5
+    causes_baseline_frames: int = 30
+    causes_max_frames: int = 150
+    causes_skip_start_s: float = 2.0
+    causes_min_rise_ms: float = 0.05
+    causes_ignore: tuple[str, ...] = field(default_factory=tuple)
 
 
 def load_thresholds(path: Path | None = None, budget_ms: float | None = None) -> Thresholds:
@@ -35,6 +41,7 @@ def load_thresholds(path: Path | None = None, budget_ms: float | None = None) ->
     bound = raw.get("bound", {})
     overrun = raw.get("overrun", {})
     hitch = raw.get("hitch", {})
+    causes = raw.get("causes", {})
     defaults = Thresholds()
     return Thresholds(
         budget_ms=float(budget_ms if budget_ms is not None else raw.get("budget_ms", defaults.budget_ms)),
@@ -46,4 +53,10 @@ def load_thresholds(path: Path | None = None, budget_ms: float | None = None) ->
         hitch_min_window_frames=int(hitch.get("min_window_frames", defaults.hitch_min_window_frames)),
         hitch_max_frames=int(hitch.get("max_frames", defaults.hitch_max_frames)),
         hitch_require_over_budget=bool(hitch.get("require_over_budget", defaults.hitch_require_over_budget)),
+        causes_top=int(causes.get("top", defaults.causes_top)),
+        causes_baseline_frames=int(causes.get("baseline_frames", defaults.causes_baseline_frames)),
+        causes_max_frames=int(causes.get("max_frames", defaults.causes_max_frames)),
+        causes_skip_start_s=float(causes.get("skip_start_s", defaults.causes_skip_start_s)),
+        causes_min_rise_ms=float(causes.get("min_rise_ms", defaults.causes_min_rise_ms)),
+        causes_ignore=tuple(causes.get("ignore", defaults.causes_ignore)),
     )

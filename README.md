@@ -6,13 +6,13 @@ The first project under test is LoadedDiceFaceOff (UE 5.7).
 
 ## Status
 
-Milestones 1 and 2 are done: the plugin records per-frame timing in a packaged Development build alongside a full Insights trace, and `ueperf analyze` finds sustained overruns and hitches in it.
+Milestones 1 to 3 are done: the plugin records per-frame timing in a packaged Development build alongside a full Insights trace, and `ueperf analyze` finds sustained overruns and hitches, names the trace timers behind each, and ranks the gains.
 
 | Milestone | State |
 | --- | --- |
 | 1. Capture spike | Done |
 | 2. Frame analysis | Done |
-| 3. Cause finding and gains ranking | Not started |
+| 3. Cause finding and gains ranking | Done |
 | 4. Single-run report | Not started |
 | 5. Lifecycle markers and capture control | Not started |
 | 6. Input driver | Not started |
@@ -113,11 +113,24 @@ It prints a summary, the sustained overruns and the hitches, and writes `analysi
 
 All thresholds are in `ueperf/thresholds.toml`.
 
+### Cause finding
+
+When the run folder has `capture.utrace`, `analyze` also reads the trace through headless Unreal Insights (found through the launcher install of UE 5.7, `--insights` or `UEPERF_INSIGHTS`). Use `--no-trace` to skip it.
+
+1. **Alignment:** every game thread `FEngineLoop::Tick` is exported, and recorded frames are matched to ticks of the same length, which gives each frame its interval on the trace clock.
+2. **Export:** timing events are exported only for over-budget frames and 30 in-budget baseline frames, on the game, render and RHI threads, the GPU queues and the task graph workers. A full 30-second game thread export is close to 500 MB, so whole-run exports are avoided. The game thread counts a frame's own tick; render, RHI, GPU and workers count that tick and the next one, because they work on a frame during the following tick.
+3. **Rise:** each timer's exclusive time on a flagged frame is compared with its median on the baseline frames. Timers that rose on the frame's bound thread are its causes. Wait and idle timers are never causes, but they are listed for hitches. When the bound thread's waits rose, worker timers that rose count as causes too, each capped at the wait rise.
+4. **Gains:** each cause's rise, capped at the frame's excess, is summed over the over-budget frames of the run and ranked. Frames in the first 2 seconds count as startup and are left out of the ranking until lifecycle markers (milestone 5) can separate loading properly.
+
+The ranking and each hitch give trace times, so you can go straight to them in Insights.
+
 ## Findings so far
 
 From 30-second idle captures of EvilLair:
 
 - Median frame 7.56 ms, p95 8.21 ms, and 12 frames over 11.1 ms, most of them during startup. There are 2 hitches, at 17.5 ms and 29.2 ms.
+- The 29.2 ms hitch is `Spawn Phase` on the game thread (+12.4 ms), with the countdown widget and spectator pawn, at 13.752 s on the trace clock. That is when the game mode starts the match 10 seconds after login.
+- The 17.5 ms hitch is the render thread waiting on worker tasks (+7.3 ms in `WaitForTasks`), and the workers were busy in `Create time` (+7.6 ms) and `Oodle.Decode`.
 - Both hitches match `FEngineLoop::Tick` events of the same length in the trace. The trace clock runs 3.10 s ahead of the plugin's `t_ms`, because it starts at process launch rather than at plugin startup.
 - The first recorder flushed to disk every 120 frames and caused an 11 to 18 ms frame each time. It now buffers in memory.
 - The trace has full CPU timers on every thread and GPU pass timers. A 30-second trace with `-statnamedevents` is about 120 MB, so traces stay out of git.
