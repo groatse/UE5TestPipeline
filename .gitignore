@@ -11,3 +11,4 @@ __pycache__/
 
 # Local runs
 runs/
+*.egg-info/

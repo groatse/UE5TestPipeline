@@ -1,0 +1,30 @@
+# Default analyzer thresholds. Copy this file and pass it with --thresholds to tune.
+
+# Frame budget in ms. A profile's budget_ms or --budget-ms overrides it.
+budget_ms = 11.1
+
+[bound]
+# An over-budget frame is "mixed" when the second-largest of game, render,
+# RHI and GPU time is within this fraction of the largest.
+mixed_within = 0.10
+
+[overrun]
+# A sustained overrun spans at least this many frames from its first to its
+# last over-budget frame...
+min_frames = 45
+# ...with no more than this many in-budget frames in a row inside it.
+max_gap_frames = 5
+
+[hitch]
+# A hitch frame takes more than this multiple of the rolling median frame time.
+factor = 2.0
+# The rolling median covers this many previous frames.
+window_frames = 90
+# It needs at least this many previous frames before hitches are judged.
+min_window_frames = 10
+# A hitch is at most this many consecutive hitch frames; longer runs are left
+# to overrun detection.
+max_frames = 3
+# Only frames over budget count as hitch frames, so small relative spikes at
+# low frame times are ignored.
+require_over_budget = true

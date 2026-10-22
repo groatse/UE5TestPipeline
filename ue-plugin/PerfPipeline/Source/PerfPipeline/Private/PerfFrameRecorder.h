@@ -2,29 +2,35 @@
 
 #include "CoreMinimal.h"
 
-class IFileHandle;
-
 /**
- * Writes one CSV row per frame from the engine's frame timing values.
- * These are set in every build configuration, Shipping included, so this
- * works without the CSV profiler or stats.
+ * Records one row per frame from the engine's frame timing values and writes
+ * them as CSV when recording stops. Rows stay in memory during the run so the
+ * recorder never touches the disk on the game thread mid-capture.
  */
 class FPerfFrameRecorder
 {
 public:
-	explicit FPerfFrameRecorder(const FString& OutputFolder);
+	explicit FPerfFrameRecorder(const FString& InOutputFolder);
 	~FPerfFrameRecorder();
 
-	bool IsOpen() const { return File.IsValid(); }
-
 private:
-	void OnEndFrame();
-	void Flush();
+	struct FRow
+	{
+		uint64 Frame;
+		double TimeMs;
+		float FrameMs;
+		float GameMs;
+		float RenderMs;
+		float RhiMs;
+		float GpuMs;
+	};
 
-	TUniquePtr<IFileHandle> File;
+	void OnEndFrame();
+	void Write() const;
+
+	FString OutputFolder;
+	TArray<FRow> Rows;
 	FDelegateHandle EndFrameHandle;
-	FString Pending;
-	int32 PendingRows = 0;
 	double StartSeconds = 0.0;
 	uint64 FirstFrame = 0;
 };
