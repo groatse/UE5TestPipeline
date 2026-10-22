@@ -25,6 +25,10 @@ void FPerfPipelineModule::StartupModule()
 
 	Recorder = MakeUnique<FPerfFrameRecorder>(OutputFolder);
 
+	// Emit verbose stat scopes as named events too, so the trace names more of the
+	// engine's per-object work. Only matters with -statnamedevents.
+	GShouldEmitVerboseNamedEvents = true;
+
 #if UE_TRACE_ENABLED
 	const int32 bTracing = UE::Trace::IsTracing() ? 1 : 0;
 #else

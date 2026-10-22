@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 
 from ueperf.ingest.frames import Frame, load_frames
+from ueperf.report.causes_html import STYLE as CAUSE_STYLE
+from ueperf.report.causes_html import gains_html, hitch_groups_html, hitches_html, overruns_html
 
 CHART_W = 1100
 CHART_H = 260
@@ -255,75 +257,6 @@ def _tiles(summary, n_hitches, n_overruns) -> str:
         f'<div class="tile"><div class="v">{_e(v)}</div><div class="k">{_e(k)}</div></div>' for v, k in tiles) + "</div>"
 
 
-def _cause_list(causes: list[dict], waits: list[dict] | None = None) -> str:
-    if not causes and not waits:
-        return '<span class="muted">no timer rose above its baseline</span>'
-    items = [f'<li><code>{_e(c["timer"])}</code> <span class="muted">{_e(c["thread"])}</span> '
-             f'+{c["rise_ms"]:.2f} ms</li>' for c in causes]
-    items += [f'<li class="muted">waiting: <code>{_e(w["timer"])}</code> {_e(w["thread"])} +{w["rise_ms"]:.2f} ms</li>'
-              for w in (waits or [])]
-    return f'<ul class="causes">{"".join(items)}</ul>'
-
-
-def _worst(gain: dict) -> str:
-    return ", ".join("%.3f" % r["start_s"] for r in gain["worst"])
-
-
-def _gains_table(causes) -> str:
-    if not causes["gains"]:
-        return '<p class="note">No over-budget gameplay frames, so there is nothing to rank.</p>'
-    rows = "".join(
-        f'<tr><td class="n">{n}</td><td class="timer"><code>{_e(g["timer"])}</code></td><td>{_e(g["thread"])}</td>'
-        f'<td class="n">{g["credit_ms"]:.2f}</td><td class="n">{g["frames"]}</td>'
-        f'<td class="n">{_worst(g)}</td></tr>'
-        for n, g in enumerate(causes["gains"], 1))
-    return ('<div class="scroll"><table><thead><tr><th class="n">#</th><th>Timer</th><th>Thread</th>'
-            '<th class="n">Over-budget time (ms)</th><th class="n">Frames</th><th class="n">Worst at, trace s</th>'
-            f'</tr></thead><tbody>{rows}</tbody></table></div>')
-
-
-def _hitch_table(analysis, causes) -> str:
-    if not analysis["hitches"]:
-        return '<p class="note">No hitches.</p>'
-    rows = []
-    for n, h in enumerate(analysis["hitches"], 1):
-        window = causes["hitch_windows"][n - 1] if causes else None
-        cause_html = _cause_list(causes["hitch_causes"][n - 1], causes["hitch_waits"][n - 1]) if causes else '<span class="muted">no trace</span>'
-        rows.append(
-            f'<tr><td>H{n}</td><td class="n">{h["start_ms"] / 1000:.2f}</td>'
-            f'<td class="n">{("%.3f" % window[0]) if window else "-"}</td><td class="n">{h["start_frame"]}</td>'
-            f'<td class="n">{h["peak_ms"]:.1f}</td><td class="n">{h["baseline_ms"]:.1f}</td><td class="n">{h["stall_ms"]:.1f}</td>'
-            f'<td>{_e(h["bound"])}</td><td>{cause_html}</td></tr>')
-    return ('<div class="scroll"><table><thead><tr><th></th><th class="n">Run s</th><th class="n">Trace s</th>'
-            '<th class="n">Frame</th><th class="n">Peak ms</th><th class="n">Median ms</th><th class="n">Stall ms</th>'
-            f'<th>Bound</th><th>Causes</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
-
-
-def _overrun_table(analysis, causes) -> str:
-    if not analysis["overruns"]:
-        return '<p class="note">No sustained overruns.</p>'
-    rows = []
-    for n, o in enumerate(analysis["overruns"], 1):
-        cause_html = _cause_list(causes["overrun_causes"][n - 1]) if causes else '<span class="muted">no trace</span>'
-        rows.append(
-            f'<tr><td>O{n}</td><td class="n">{o["start_ms"] / 1000:.2f} to {o["end_ms"] / 1000:.2f}</td>'
-            f'<td class="n">{o["frames_over"]} / {o["frames"]}</td><td class="n">{o["total_excess_ms"]:.1f}</td>'
-            f'<td class="n">{o["peak_ms"]:.1f}</td><td>{_e(o["bound"])}</td><td>{cause_html}</td></tr>')
-    return ('<div class="scroll"><table><thead><tr><th></th><th class="n">Run s</th><th class="n">Frames over</th>'
-            '<th class="n">Excess ms</th><th class="n">Peak ms</th><th>Bound</th><th>Causes, per frame</th>'
-            f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
-
-
-def _hitch_groups(causes) -> str:
-    if not causes or not causes["hitch_groups"]:
-        return ""
-    rows = "".join(
-        f'<tr><td class="timer"><code>{_e(g["timer"])}</code></td><td>{_e(g["thread"])}</td>'
-        f'<td class="n">{g["hitches"]}</td><td class="n">{g["stall_ms"]:.1f}</td></tr>' for g in causes["hitch_groups"])
-    return ('<h2>Hitches by cause</h2><div class="scroll"><table><thead><tr><th>Top cause</th><th>Thread</th>'
-            f'<th class="n">Hitches</th><th class="n">Stall ms</th></tr></thead><tbody>{rows}</tbody></table></div>')
-
-
 FORMATTER = """
 <script>
 for (const card of document.querySelectorAll('.card[data-chart]')) {
@@ -340,7 +273,6 @@ for (const card of document.querySelectorAll('.card[data-chart]')) {
 """
 
 
-
 def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str = "") -> str:
     summary = analysis["summary"]
     causes = analysis.get("causes")
@@ -349,11 +281,12 @@ def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str 
 
     trace_note = ""
     if causes:
-        trace_note = (f'<p class="note">Causes come from {causes["frames_read"]} of {causes["frames_over"]} gameplay '
-                      f'over-budget frames, compared with {causes["baseline_frames"]} in-budget baseline frames. '
-                      f'{causes["startup_frames_over"]} more over-budget frames fell in the first 2 s (startup) and are '
-                      f'left out of the ranking. Trace times are on the Insights clock, about '
-                      f'{causes["trace_offset_s"]:.3f} s ahead of run time.</p>')
+        trace_note = (f'<p class="note">Each hitch is read from the trace and compared with {causes["baseline_frames"]} '
+                      f'in-budget frames. <b>Rise</b> is time above a scope\'s usual cost on those frames; <b>own</b> is '
+                      f'time spent in the scope itself rather than in instrumented scopes below it, so a hot spot with a '
+                      f'large own rise and no deeper scopes is where to add instrumentation or start reading code. '
+                      f'Trace times are on the Insights clock, about {causes["trace_offset_s"]:.3f} s ahead of run time; '
+                      f'open the trace there to see the same scopes.</p>')
 
     sections = [
         f'<h1>{_e(name)}</h1>',
@@ -361,22 +294,24 @@ def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str 
         _tiles(summary, len(analysis["hitches"]), len(analysis["overruns"])),
         '<h2>Frame time</h2>', _frame_chart(frames, analysis, causes, budget),
         '<h2>Thread and GPU time per frame</h2>', _thread_chart(frames, analysis, budget),
+        '<h2>Hitches</h2>', trace_note, hitches_html(analysis, causes), hitch_groups_html(causes),
+        '<h2>Sustained overruns</h2>', overruns_html(analysis, causes),
     ]
     if causes:
         sections += ['<h2>Gains ranking</h2>',
-                     '<p class="note">Over-budget time each timer accounts for: its rise above the baseline median, '
-                     'capped at each frame\'s excess, summed over the run.</p>', _gains_table(causes), trace_note]
+                     f'<p class="note">Hot spots across {causes["frames_read"]} of {causes["frames_over"]} gameplay '
+                     'over-budget frames: each one\'s own rise over its usual cost, scaled so a frame never gives out more '
+                     f'than its excess, summed over the run. {causes["startup_frames_over"]} over-budget frames in the first '
+                     f'{causes["skip_start_s"]:g} s count as startup and are left out.</p>', gains_html(causes)]
     else:
         sections += ['<h2>Gains ranking</h2>', '<p class="note">No trace was analyzed for this run.</p>']
-    sections += ['<h2>Hitches</h2>', _hitch_table(analysis, causes), _hitch_groups(causes),
-                 '<h2>Sustained overruns</h2>', _overrun_table(analysis, causes)]
     if run_info:
         sections += ['<h2>Run info</h2>', f'<pre>{_e(run_info)}</pre>']
 
     body = "".join(sections)
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f'<title>{_e(name)} perf report</title><style>{STYLE}</style></head>'
+            f'<title>{_e(name)} perf report</title><style>{STYLE}{CAUSE_STYLE}</style></head>'
             f'<body><div class="viz-root"><main>{body}</main></div>{FORMATTER}<script>{SCRIPT}</script></body></html>')
 
 

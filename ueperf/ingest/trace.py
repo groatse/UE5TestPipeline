@@ -162,6 +162,68 @@ def export_frame_events(
     return events
 
 
+Path = tuple[str, ...]
+
+
+def path_times(events: list[Event], windows: list[FrameWindow | None], index: int) -> dict[tuple[str, Path], list[float]]:
+    """Inclusive and exclusive ms per (thread group, call path) for one frame.
+
+    A call path is the chain of scope names from the thread's top-level scope
+    down to the scope itself. Calls on the same path are summed, and paths on
+    different threads of a group (render threads, workers) are merged. Times
+    are clipped to the frame's interval as in `exclusive_ms`.
+    """
+    interval = window_for(windows, index)
+    own = windows[index]
+    if interval is None or own is None:
+        return {}
+
+    by_thread: dict[str, list[Event]] = defaultdict(list)
+    for e in events:
+        if thread_group(e.thread):
+            by_thread[e.thread].append(e)
+
+    totals: dict[tuple[str, Path], list[float]] = defaultdict(lambda: [0.0, 0.0])
+    for thread, thread_events in by_thread.items():
+        group = thread_group(thread)
+        lo, hi = (own.start_s, own.end_s) if group == "game" else interval
+        thread_events.sort(key=lambda e: (e.start_s, e.depth))
+
+        stack: list[list] = []  # [event, path, child time]
+
+        def close(item: list) -> None:
+            event, path, child = item
+            clipped = max(0.0, min(event.end_s, hi) - max(event.start_s, lo))
+            t = totals[(group, path)]
+            t[0] += clipped * 1000.0
+            t[1] += max(0.0, clipped - child) * 1000.0
+            if stack:
+                stack[-1][2] += clipped
+
+        for e in thread_events:
+            while stack and stack[-1][0].depth >= e.depth:
+                close(stack.pop())
+            parent_path = stack[-1][1] if stack else ()
+            stack.append([e, parent_path + (e.timer,), 0.0])
+        while stack:
+            close(stack.pop())
+
+    return dict(totals)
+
+
+def export_timers(insights: Path, trace: Path, workdir: Path) -> dict[str, tuple[str, int]]:
+    """Source file and line Insights knows for each timer name (CPU profiler scopes only)."""
+    out = workdir / "timers.csv"
+    run_commands(insights, trace, [f"TimingInsights.ExportTimers {out}"], workdir)
+    sources = {}
+    if out.exists():
+        with open(out, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                if row.get("File"):
+                    sources.setdefault(row["Name"], (row["File"], int(row.get("Line") or 0)))
+    return sources
+
+
 def exclusive_ms(events: list[Event], windows: list[FrameWindow | None], index: int) -> dict[tuple[str, str], float]:
     """Exclusive time in ms per (thread group, timer) for one frame.
 

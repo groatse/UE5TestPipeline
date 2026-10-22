@@ -52,6 +52,4 @@ ignore = [
   "*Sleep*",
   "Oversubscription",
   "*LookingForWork*",
-  "FEngineLoop::Tick",
-  "Frame",
 ]

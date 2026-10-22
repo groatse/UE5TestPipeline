@@ -115,14 +115,21 @@ All thresholds are in `ueperf/thresholds.toml`.
 
 ### Cause finding
 
-When the run folder has `capture.utrace`, `analyze` also reads the trace through headless Unreal Insights (found through the launcher install of UE 5.7, `--insights` or `UEPERF_INSIGHTS`). Use `--no-trace` to skip it.
+When the run folder has `capture.utrace`, `analyze` also reads the trace through headless Unreal Insights (found through the launcher install of UE 5.7, `--insights` or `UEPERF_INSIGHTS`). Pass `--project <folder>` so scopes in game code and Blueprint assets resolve too. Use `--no-trace` to skip it.
+
+```powershell
+ueperf analyze runs\spike3 --project D:\UE5\LoadedDiceFaceOff
+```
 
 1. **Alignment:** every game thread `FEngineLoop::Tick` is exported, and recorded frames are matched to ticks of the same length, which gives each frame its interval on the trace clock.
 2. **Export:** timing events are exported only for over-budget frames and 30 in-budget baseline frames, on the game, render and RHI threads, the GPU queues and the task graph workers. A full 30-second game thread export is close to 500 MB, so whole-run exports are avoided. The game thread counts a frame's own tick; render, RHI, GPU and workers count that tick and the next one, because they work on a frame during the following tick.
-3. **Rise:** each timer's exclusive time on a flagged frame is compared with its median on the baseline frames. Timers that rose on the frame's bound thread are its causes. Wait and idle timers are never causes, but they are listed for hitches. When the bound thread's waits rose, worker timers that rose count as causes too, each capped at the wait rise.
-4. **Gains:** each cause's rise, capped at the frame's excess, is summed over the over-budget frames of the run and ranked. Frames in the first 2 seconds count as startup and are left out of the ranking until lifecycle markers (milestone 5) can separate loading properly.
+3. **Call paths:** events are rebuilt into call paths, the chain of scopes from a thread's top-level scope down to each scope, with inclusive and own (exclusive) time. Each path is compared with its median on the baseline frames.
+4. **Hot spots:** paths whose own time rose are where the extra time was actually spent. A hot spot with a large own rise and nothing instrumented below it is the place to add a scope or start reading code. When the bound thread's rise is waiting (`WaitForTasks` and similar), worker paths that rose are hot spots too, scaled so they never claim more than the wait.
+5. **Call tree:** every path whose inclusive time rose is shown as a tree, so the chain from the engine loop through timers, Blueprint functions and event graphs down to the hot spot is visible.
+6. **What each scope is:** names resolve through Insights' own timer sources, a source index of engine and project code (cycle stats, quick scopes, CPU profiler scopes, named events, RDG passes, with the enclosing function), and the project's `Content` assets. Scopes are labelled C++, Blueprint function or event (with the owning Blueprint and asset path), object (Blueprint class or widget animation), UObject, GPU pass or wait. The engine index takes about 45 s on first use and is cached in `%LOCALAPPDATA%\ueperf`; `--reindex` rebuilds it.
+7. **Gains:** hot-spot rises on each gameplay over-budget frame, scaled so a frame never gives out more than its excess, are summed per call path and ranked. Frames in the first 2 seconds count as startup and are left out until lifecycle markers (milestone 5) separate loading properly.
 
-The ranking and each hitch give trace times, so you can go straight to them in Insights.
+The plugin turns on verbose named events, so the trace names more per-object work (component registration, widget animation instances).
 
 ### Report
 
@@ -132,15 +139,16 @@ The ranking and each hitch give trace times, so you can go straight to them in I
 - frame time against the budget line, with hitches, sustained overruns and the startup window marked
 - game, render, RHI and GPU time per frame
 - hovering either chart shows the frame's numbers and its approximate trace time
-- the gains ranking, hitches with their causes and waits, hitches grouped by cause, sustained overruns, and the run info
+- each hitch and overrun with its hot spots (own-time rise, source location, full call path) and a call tree
+- hitches grouped by top hot spot, the gains ranking by call path, and the run info
 
 ## Findings so far
 
 From 30-second idle captures of EvilLair:
 
 - Median frame 7.56 ms, p95 8.21 ms, and 12 frames over 11.1 ms, most of them during startup. There are 2 hitches, at 17.5 ms and 29.2 ms.
-- The 29.2 ms hitch is `Spawn Phase` on the game thread (+12.4 ms), with the countdown widget and spectator pawn, at 13.752 s on the trace clock. That is when the game mode starts the match 10 seconds after login.
-- The 17.5 ms hitch is the render thread waiting on worker tasks (+7.3 ms in `WaitForTasks`), and the workers were busy in `Create time` (+7.6 ms) and `Oodle.Decode`.
+- The 29 to 38 ms game thread hitch about 10.6 s in is the first play of a HUD animation. A timer on `BP_GameModeLoadedDice_C` runs `Client_OnCountdownTick`, then `OnCountdownTick` in `BP_ControllerLoadedDice`, then `SetCounterVisibility` and `PlayAnimationForward` in `W_GameHUD`, then `Widget::PlayAnimation` (`UserWidget.cpp:844`). On the next Slate tick the MovieScene runner's `Spawn Phase` (`MovieSceneEntitySystemRunner.cpp:1080`) takes about 12 ms to set up the `CounterFadeIn` animation's entities. In the same frame, spawning the pawn registers a `SpringArm` component (+2.3 ms).
+- The 17 to 24 ms render thread hitch is the render thread waiting on workers. They are compiling a pipeline state at runtime (`Create time`, `WindowsD3D12PipelineState.cpp:758`, under `PSOPrecache: Precached` for `GPUScene.UploadDynamicPrimitiveShaderDataForView`) and processing the RHI delete queue.
 - Both hitches match `FEngineLoop::Tick` events of the same length in the trace. The trace clock runs 3.10 s ahead of the plugin's `t_ms`, because it starts at process launch rather than at plugin startup.
 - The first recorder flushed to disk every 120 frames and caused an 11 to 18 ms frame each time. It now buffers in memory.
 - The trace has full CPU timers on every thread and GPU pass timers. A 30-second trace with `-statnamedevents` is about 120 MB, so traces stay out of git.

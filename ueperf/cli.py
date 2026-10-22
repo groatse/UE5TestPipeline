@@ -13,6 +13,7 @@ from ueperf.config import load_thresholds
 from ueperf.ingest.frames import load_frames
 from ueperf.insights import InsightsError, find_insights
 from ueperf.report import write_report
+from ueperf.source_index import load_or_build
 
 
 def _print_analysis(result: Analysis) -> None:
@@ -38,37 +39,53 @@ def _print_analysis(result: Analysis) -> None:
               f"peak {h.peak_ms:.1f} ms vs {h.baseline_ms:.1f} ms  stall {h.stall_ms:.1f} ms  {h.bound}")
 
 
+KIND_LABEL = {"cpp": "C++", "stat": "C++ stat", "gpu": "GPU pass", "object": "object", "blueprint": "Blueprint",
+              "uobject": "UObject", "wait": "wait", "unknown": "?"}
+
+
+def _scope_text(scope) -> str:
+    where = scope.source or "no source found"
+    more = f" (+{scope.more_sites} more sites)" if scope.more_sites else ""
+    return f"[{KIND_LABEL.get(scope.kind, scope.kind)}] {where}{more}"
+
+
+def _print_explanation(expl, indent: str = "    ") -> None:
+    if not expl.tree and not expl.hotspots:
+        print(f"{indent}no scope rose above its baseline")
+    if expl.tree:
+        print(f"{indent}Call tree (inclusive ms, rise over baseline):")
+        for node in expl.tree:
+            pad = "  " * node.depth
+            self_note = f", self +{node.self_rise_ms:.2f}" if node.self_rise_ms >= 0.25 else ""
+            print(f"{indent}  {node.thread:<7} {pad}{node.path[-1]}  {node.ms:.2f} ms (+{node.rise_ms:.2f}{self_note})"
+                  f"  {_scope_text(node.scope)}")
+    if expl.hotspots:
+        print(f"{indent}Where the time went (own time that rose):")
+        for h in expl.hotspots[:8]:
+            print(f"{indent}  +{h.rise_ms:6.2f} ms  {h.thread:<7} {h.path[-1]}  {_scope_text(h.scope)}")
+            print(f"{indent}             path: {' > '.join(h.path)}")
+    for w in expl.waits:
+        print(f"{indent}waiting: {w.thread} {w.timer} +{w.rise_ms:.2f} ms")
+
+
 def _print_causes(result: Analysis, report: CauseReport) -> None:
     print(f"\nTrace: {report.frames_read} of {report.frames_over} gameplay over-budget frames read "
           f"({report.startup_frames_over} more during startup), {report.baseline_frames} baseline frames, "
           f"trace clock +{report.trace_offset_s:.3f} s")
 
-    def line(c) -> str:
-        return f"{c.thread:<7} {c.timer[:70]:<70} +{c.rise_ms:.2f} ms (median {c.baseline_ms:.2f})"
+    for n, (h, expl, window) in enumerate(zip(result.hitches, report.hitches, report.hitch_windows), 1):
+        at = f", trace {window[0]:.3f} to {window[1]:.3f} s" if window else ""
+        print(f"\nH{n}: frame {h.start_frame}, {h.peak_ms:.1f} ms vs {h.baseline_ms:.1f} ms, {h.bound}-bound{at}")
+        _print_explanation(expl)
+    for n, (o, expl) in enumerate(zip(result.overruns, report.overruns), 1):
+        print(f"\nO{n}: frames {o.start_frame}-{o.end_frame}, per frame on average")
+        _print_explanation(expl)
 
-    for h, causes, waits, window in zip(result.hitches, report.hitch_causes, report.hitch_waits, report.hitch_windows):
-        at = f", trace {window[0]:.3f} s" if window else ""
-        print(f"\n  Hitch at frame {h.start_frame} ({h.peak_ms:.1f} ms, {h.bound}-bound{at}):")
-        for c in causes or []:
-            print(f"    {line(c)}")
-        if not causes:
-            print("    no work timer rose above its baseline")
-        for w in waits:
-            print(f"    waiting: {line(w)}")
-    for o, causes in zip(result.overruns, report.overrun_causes):
-        print(f"\n  Overrun frames {o.start_frame}-{o.end_frame}, per frame:")
-        for c in causes:
-            print(f"    {line(c)}")
-
-    print("\nGains ranking (over-budget time each timer accounts for):")
+    print("\nGains ranking (over-budget time each hot spot accounts for):")
     for n, g in enumerate(report.gains[:15], 1):
         where = ", ".join(f"{r.start_s:.3f} s" for r in g.worst)
-        print(f"  {n:>2}. {g.thread:<7} {g.timer[:70]:<70} {g.credit_ms:8.2f} ms  {g.frames} frames  worst at {where}")
-
-    if report.hitch_groups:
-        print("\nHitches by cause:")
-        for g in report.hitch_groups:
-            print(f"  {g.thread:<7} {g.timer[:70]:<70} {g.hitches} hitches, {g.stall_ms:.1f} ms stall")
+        print(f"  {n:>2}. {g.credit_ms:8.2f} ms  {g.thread:<7} {g.path[-1]}  {_scope_text(g.scope)}")
+        print(f"      {g.frames} frames, worst at {where}; path: {' > '.join(g.path)}")
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
@@ -93,8 +110,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     else:
         try:
             insights = find_insights(args.insights)
+            engine = insights.parents[3]
+            project = Path(args.project).resolve() if args.project else None
+            index = load_or_build(engine, project, rebuild=args.reindex)
+            roots = [r for r in (project, engine) if r]
             print(f"\nReading the trace with {insights} ...")
-            report = find_causes(frames, result, trace, insights, run / "trace_export", thresholds)
+            report = find_causes(frames, result, trace, insights, run / "trace_export", thresholds, index, roots, project)
         except InsightsError as e:
             print(f"\nCause finding failed: {e}", file=sys.stderr)
             return 1
@@ -127,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--thresholds", type=Path, default=None, help="thresholds TOML file")
     p.add_argument("--no-trace", action="store_true", help="skip cause finding from capture.utrace")
     p.add_argument("--insights", type=Path, default=None, help="path to UnrealInsights.exe")
+    p.add_argument("--project", type=Path, default=None,
+                   help="project folder, so scopes in game code resolve to its source")
+    p.add_argument("--reindex", action="store_true", help="rebuild the cached engine source index")
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("report", help="write report.html from a run folder's analysis.json")
