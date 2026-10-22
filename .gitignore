@@ -1,0 +1,13 @@
+xr-perf-test-pipeline.md
+
+# UE build output
+ue-plugin/*/Binaries/
+ue-plugin/*/Intermediate/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local runs
+runs/

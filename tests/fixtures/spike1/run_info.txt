@@ -1,0 +1,6 @@
+build_config=Development
+ue_trace_enabled=1
+tracing=1
+csv_profiler=1
+stats=1
+command_line=/Game/EvilLair -game -windowed -ResX=1920 -ResY=1080 -nosteam -ini:Engine:[OnlineSubsystem]:DefaultPlatformService=Null -trace=default,gpu -statnamedevents -tracefile=D:\UE5\TestPipeline\runs\spike1\capture.utrace -PerfOut=D:\UE5\TestPipeline\runs\spike1 -PerfQuitAfter=60 -log -abslog=D:\UE5\TestPipeline\runs\spike1\game.log

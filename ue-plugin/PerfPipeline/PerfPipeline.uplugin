@@ -1,0 +1,16 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1",
+	"FriendlyName": "PerfPipeline",
+	"Description": "Automated performance playtests: frame recording, lifecycle markers and capture control.",
+	"Category": "Performance",
+	"CanContainContent": false,
+	"Modules": [
+		{
+			"Name": "PerfPipeline",
+			"Type": "Runtime",
+			"LoadingPhase": "PostEngineInit"
+		}
+	]
+}

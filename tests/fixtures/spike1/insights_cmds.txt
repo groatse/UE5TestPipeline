@@ -1,0 +1,4 @@
+TimingInsights.ExportThreads D:\UE5\TestPipeline\runs\spike1\export\threads.csv
+TimingInsights.ExportTimers D:\UE5\TestPipeline\runs\spike1\export\timers.csv
+TimingInsights.ExportTimerStatistics D:\UE5\TestPipeline\runs\spike1\export\timer_stats.csv -threads=GameThread,RenderThread*,RHIThread,GPU* -timers=*
+TimingInsights.ExportTimingEvents D:\UE5\TestPipeline\runs\spike1\export\events_window.csv -threads=GameThread -timers=* -startTime=30 -endTime=31
