@@ -6,14 +6,14 @@ The first project under test is LoadedDiceFaceOff (UE 5.7).
 
 ## Status
 
-Milestones 1 to 3 are done: the plugin records per-frame timing in a packaged Development build alongside a full Insights trace, and `ueperf analyze` finds sustained overruns and hitches, names the trace timers behind each, and ranks the gains.
+Milestones 1 to 4 are done: the plugin records per-frame timing in a packaged Development build alongside a full Insights trace, and `ueperf analyze` finds sustained overruns and hitches, names the trace timers behind each, and ranks the gains.
 
 | Milestone | State |
 | --- | --- |
 | 1. Capture spike | Done |
 | 2. Frame analysis | Done |
 | 3. Cause finding and gains ranking | Done |
-| 4. Single-run report | Not started |
+| 4. Single-run report | Done |
 | 5. Lifecycle markers and capture control | Not started |
 | 6. Input driver | Not started |
 | 7. Onboarding, launcher and supervision | Not started |
@@ -123,6 +123,16 @@ When the run folder has `capture.utrace`, `analyze` also reads the trace through
 4. **Gains:** each cause's rise, capped at the frame's excess, is summed over the over-budget frames of the run and ranked. Frames in the first 2 seconds count as startup and are left out of the ranking until lifecycle markers (milestone 5) can separate loading properly.
 
 The ranking and each hitch give trace times, so you can go straight to them in Insights.
+
+### Report
+
+`analyze` also writes `report.html` to the run folder; `ueperf report <run>` rewrites it from an existing `analysis.json`. It is one self-contained file that opens offline and follows the system light or dark theme:
+
+- summary tiles (median, p95, p99, worst frame, share over budget, hitch and overrun counts)
+- frame time against the budget line, with hitches, sustained overruns and the startup window marked
+- game, render, RHI and GPU time per frame
+- hovering either chart shows the frame's numbers and its approximate trace time
+- the gains ranking, hitches with their causes and waits, hitches grouped by cause, sustained overruns, and the run info
 
 ## Findings so far
 

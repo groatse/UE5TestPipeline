@@ -12,6 +12,7 @@ from ueperf.causes import CauseReport, find_causes
 from ueperf.config import load_thresholds
 from ueperf.ingest.frames import load_frames
 from ueperf.insights import InsightsError, find_insights
+from ueperf.report import write_report
 
 
 def _print_analysis(result: Analysis) -> None:
@@ -103,6 +104,16 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     out = run / "analysis.json"
     out.write_text(json.dumps(output, indent=2), encoding="utf-8")
     print(f"\nWrote {out}")
+    print(f"Wrote {write_report(run)}")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    run = Path(args.run).resolve()
+    if not (run / "analysis.json").exists():
+        print(f"No analysis.json in {run}; run 'ueperf analyze' first", file=sys.stderr)
+        return 1
+    print(f"Wrote {write_report(run)}")
     return 0
 
 
@@ -117,6 +128,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-trace", action="store_true", help="skip cause finding from capture.utrace")
     p.add_argument("--insights", type=Path, default=None, help="path to UnrealInsights.exe")
     p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("report", help="write report.html from a run folder's analysis.json")
+    p.add_argument("run", help="run folder containing analysis.json and frames.csv")
+    p.set_defaults(func=cmd_report)
 
     args = parser.parse_args(argv)
     return args.func(args)

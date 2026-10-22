@@ -63,6 +63,7 @@ class CauseReport:
     frames_read: int
     frames_over: int
     startup_frames_over: int
+    skip_start_s: float
     baseline_frames: int
     hitch_windows: list[tuple[float, float] | None] = field(default_factory=list)
     hitch_causes: list[list[Cause]] = field(default_factory=list)
@@ -229,6 +230,7 @@ def compute_report(
         frames_read=len(read),
         frames_over=len(gameplay_over),
         startup_frames_over=startup_over,
+        skip_start_s=t.causes_skip_start_s,
         baseline_frames=len([i for i in baseline if i in per_frame]),
         hitch_windows=hitch_windows,
         hitch_causes=hitch_causes,
