@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import statistics
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 from ueperf.config import Thresholds
 from ueperf.ingest.frames import Frame
+from ueperf.ingest.markers import Marker
+from ueperf.phases import NON_GAMEPLAY, assign_phases, last_marker_before
 
 MIXED = "mixed"
 
@@ -24,6 +26,9 @@ class Overrun:
     bound: str
     peak_frame: int
     peak_ms: float
+    phase: str = ""
+    after_marker: str = ""
+    after_marker_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,22 @@ class Hitch:
     baseline_ms: float
     stall_ms: float
     bound: str
+    phase: str = ""
+    after_marker: str = ""
+    after_marker_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class PhaseSummary:
+    phase: str
+    start_frame: int
+    start_ms: float
+    frames: int
+    duration_s: float
+    median_ms: float
+    p95_ms: float
+    p99_ms: float
+    frames_over: int
 
 
 @dataclass(frozen=True)
@@ -58,9 +79,24 @@ class Analysis:
     summary: Summary
     overruns: list[Overrun] = field(default_factory=list)
     hitches: list[Hitch] = field(default_factory=list)
+    markers: list[Marker] = field(default_factory=list)
+    phases: list[PhaseSummary] = field(default_factory=list)
+    frame_phases: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("frame_phases")  # one entry per frame; `phases` carries the same information
+        return d
+
+    def is_gameplay(self, index: int, frames: list[Frame], t: Thresholds) -> bool:
+        """Whether frame `index` is gameplay, not startup or loading.
+
+        Uses lifecycle phases when the run has markers, else treats the first
+        `causes_skip_start_s` seconds as startup.
+        """
+        if self.frame_phases:
+            return self.frame_phases[index] not in NON_GAMEPLAY
+        return frames[index].t_ms >= frames[0].t_ms + t.causes_skip_start_s * 1000.0
 
 
 def frame_cost(frame: Frame) -> float:
@@ -186,9 +222,53 @@ def summarize(frames: list[Frame], t: Thresholds) -> Summary:
     )
 
 
-def analyze(frames: list[Frame], t: Thresholds) -> Analysis:
+def summarize_phases(frames: list[Frame], frame_phases: list[str], t: Thresholds) -> list[PhaseSummary]:
+    """One summary per contiguous stretch of the same phase, in order."""
+    out, start = [], 0
+    for i in range(1, len(frames) + 1):
+        if i < len(frames) and frame_phases[i] == frame_phases[start]:
+            continue
+        stretch = frames[start:i]
+        costs = sorted(frame_cost(f) for f in stretch)
+        out.append(PhaseSummary(
+            phase=frame_phases[start],
+            start_frame=stretch[0].frame,
+            start_ms=stretch[0].t_ms,
+            frames=len(stretch),
+            duration_s=round((stretch[-1].t_ms - stretch[0].t_ms) / 1000.0, 3),
+            median_ms=round(statistics.median(costs), 3),
+            p95_ms=percentile(costs, 95),
+            p99_ms=percentile(costs, 99),
+            frames_over=sum(1 for c in costs if c > t.budget_ms),
+        ))
+        start = i
+    return out
+
+
+def _with_context(item, index_of: dict[int, int], frame_phases: list[str], markers: list[Marker]):
+    """Attach the phase and the latest lifecycle marker before an overrun or hitch."""
+    phase = frame_phases[index_of[item.start_frame]] if frame_phases else ""
+    marker = last_marker_before(markers, item.start_frame)
+    if marker is None:
+        return replace(item, phase=phase)
+    return replace(item, phase=phase, after_marker=marker.name,
+                   after_marker_s=round((item.start_ms - marker.t_ms) / 1000.0, 3))
+
+
+def analyze(
+    frames: list[Frame],
+    t: Thresholds,
+    markers: list[Marker] | None = None,
+    phase_map: dict[str, str] | None = None,
+) -> Analysis:
+    markers = sorted(markers or [], key=lambda m: (m.frame, m.t_ms))
+    frame_phases = assign_phases(frames, markers, phase_map or {}) if markers else []
+    index_of = {f.frame: i for i, f in enumerate(frames)}
     return Analysis(
         summary=summarize(frames, t),
-        overruns=find_overruns(frames, t),
-        hitches=find_hitches(frames, t),
+        overruns=[_with_context(o, index_of, frame_phases, markers) for o in find_overruns(frames, t)],
+        hitches=[_with_context(h, index_of, frame_phases, markers) for h in find_hitches(frames, t)],
+        markers=markers,
+        phases=summarize_phases(frames, frame_phases, t) if frame_phases else [],
+        frame_phases=frame_phases,
     )

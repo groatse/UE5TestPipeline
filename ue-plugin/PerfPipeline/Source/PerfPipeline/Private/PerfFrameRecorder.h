@@ -13,7 +13,20 @@ public:
 	explicit FPerfFrameRecorder(const FString& InOutputFolder);
 	~FPerfFrameRecorder();
 
+	/** Record a lifecycle marker on the current frame; written to markers.csv. Game thread only. */
+	void AddMarker(const FString& Name, const FString& Detail);
+
 private:
+	struct FMarker
+	{
+		uint64 Frame;
+		double TimeMs;
+		FString Name;
+		FString Detail;
+	};
+
+	TArray<FMarker> Markers;
+
 	struct FRow
 	{
 		uint64 Frame;

@@ -6,7 +6,7 @@ The first project under test is LoadedDiceFaceOff (UE 5.7).
 
 ## Status
 
-Milestones 1 to 4 are done: the plugin records per-frame timing in a packaged Development build alongside a full Insights trace, and `ueperf analyze` finds sustained overruns and hitches, names the trace timers behind each, and ranks the gains.
+Milestones 1 to 5 are done: the plugin records per-frame timing and lifecycle markers in a packaged Development build alongside a full Insights trace, and `ueperf analyze` finds sustained overruns and hitches, explains each as call paths from the trace, places it in its lifecycle phase, and ranks the gains.
 
 | Milestone | State |
 | --- | --- |
@@ -14,7 +14,7 @@ Milestones 1 to 4 are done: the plugin records per-frame timing in a packaged De
 | 2. Frame analysis | Done |
 | 3. Cause finding and gains ranking | Done |
 | 4. Single-run report | Done |
-| 5. Lifecycle markers and capture control | Not started |
+| 5. Lifecycle markers and capture control | Done |
 | 6. Input driver | Not started |
 | 7. Onboarding, launcher and supervision | Not started |
 | 8. Results store | Not started |
@@ -32,8 +32,9 @@ Captures use packaged **Development** builds. The launcher engine can't build Sh
 ## Repo layout
 
 ```
-ue-plugin/PerfPipeline/   UE plugin: frame recorder and capture control
-ueperf/                   Python package: ingest, analyzer, command line
+ue-plugin/PerfPipeline/   UE plugin: frame recorder, lifecycle markers, capture control
+profiles/                 game profiles (run settings, lifecycle events, phases)
+ueperf/                   Python package: ingest, analyzer, report, command line
   thresholds.toml         default analyzer thresholds
 tests/                    analyzer tests
 tests/fixtures/           recorded captures used by the tests
@@ -67,13 +68,30 @@ Runs start straight in a gameplay map, standalone, with Steam off:
 LoadedDiceFaceOff.exe /Game/EvilLair -game -windowed -ResX=1920 -ResY=1080 `
   -nosteam -ini:Engine:[OnlineSubsystem]:DefaultPlatformService=Null `
   -trace=default,gpu -statnamedevents -tracefile=<run>\capture.utrace `
-  -PerfOut=<run> -PerfQuitAfter=30 -log -abslog=<run>\game.log
+  -PerfOut=<run> -PerfQuitAfter=30 -PerfEvents=<run>\events.json -PerfQuitOn=match_end `
+  -log -abslog=<run>\game.log
 ```
 
 | Argument | Effect |
 | --- | --- |
-| `-PerfOut=<folder>` | Writes `frames.csv` (one row per frame) and `run_info.txt` (what the build can record) |
+| `-PerfOut=<folder>` | Writes `frames.csv` (one row per frame), `markers.csv` (lifecycle markers) and `run_info.txt` (what the build can record) |
 | `-PerfQuitAfter=<seconds>` | Quits the game after that many seconds |
+| `-PerfEvents=<file>` | JSON list of game-specific lifecycle events; `ueperf events <profile> <file>` writes it from a profile |
+| `-PerfQuitOn=<marker>` | Quits the game when that lifecycle marker fires |
+
+## Lifecycle markers
+
+Markers are predictable lifecycle events, never gameplay segments. They label phases such as loading and the match, and give each hitch its context ("0.02 s after `countdown_start`"). None of them needs game code. Each marker goes to `markers.csv` and into the trace as an Insights bookmark (`PerfMarker <name> <detail>`).
+
+- **Engine events, always on:** `run_start`, `map_load_start`, `map_load_end`, `player_login`, `pawn_possessed` (with the pawn class), `travel`, `match_state` (games using `AGameMode`), `run_end`.
+- **Game events, from the profile's `[[lifecycle]]` entries:**
+  - `poll = "GameMode.IsMatchEnded"`: a bool property or parameterless bool function on `GameMode`, `GameState`, `PlayerController` or `Pawn`, read through reflection every 0.1 s; fires when it turns true.
+  - `spawn = "BP_DiceActor_C"`: an actor of that class, or with it in its class chain, is spawned.
+  - `log = "GAME SUMMARY"`: a log line contains the text.
+  - `scope = "Client_OnGameStarted"`: a trace scope, such as a UFunction or RPC. These are found by the analyzer in the trace after the run, for moments the game exposes to nothing reflected.
+- **Phases:** the profile's `[phases]` maps markers to the phase they start. Frames before the first one are `startup`. Startup and loading frames stay out of baselines and the gains ranking.
+
+For LoadedDiceFaceOff (`profiles/LoadedDiceFaceOff.toml`): `countdown_start` is the dice spawn in `AGameModeLoadedDice::StartGame`, `match_start` is the `Client_OnGameStarted` RPC from `LaunchMatch`, and `match_end` polls the game mode's `IsMatchEnded`.
 
 `frames.csv` columns: `frame, t_ms, frame_ms, game_ms, render_ms, rhi_ms, gpu_ms`. Thread and GPU times come from the engine's frame timing values, so they don't depend on the CSV profiler or stats. `frame_ms` is the engine delta time, which describes the previous frame; ingest pairs each frame's thread times with the next row's `frame_ms`. Rows are kept in memory and written when recording stops, so the recorder never writes to disk mid-capture.
 
@@ -115,10 +133,10 @@ All thresholds are in `ueperf/thresholds.toml`.
 
 ### Cause finding
 
-When the run folder has `capture.utrace`, `analyze` also reads the trace through headless Unreal Insights (found through the launcher install of UE 5.7, `--insights` or `UEPERF_INSIGHTS`). Pass `--project <folder>` so scopes in game code and Blueprint assets resolve too. Use `--no-trace` to skip it.
+When the run folder has `capture.utrace`, `analyze` also reads the trace through headless Unreal Insights (found through the launcher install of UE 5.7, `--insights` or `UEPERF_INSIGHTS`). Pass `--profile <profile>` (or `--project <folder>`) so scopes in game code and Blueprint assets resolve, lifecycle scopes are found and phases apply. Use `--no-trace` to skip it.
 
 ```powershell
-ueperf analyze runs\spike3 --project D:\UE5\LoadedDiceFaceOff
+ueperf analyze runs\m5a --profile profiles\LoadedDiceFaceOff.toml
 ```
 
 1. **Alignment:** every game thread `FEngineLoop::Tick` is exported, and recorded frames are matched to ticks of the same length, which gives each frame its interval on the trace clock.
@@ -127,7 +145,7 @@ ueperf analyze runs\spike3 --project D:\UE5\LoadedDiceFaceOff
 4. **Hot spots:** paths whose own time rose are where the extra time was actually spent. A hot spot with a large own rise and nothing instrumented below it is the place to add a scope or start reading code. When the bound thread's rise is waiting (`WaitForTasks` and similar), worker paths that rose are hot spots too, scaled so they never claim more than the wait.
 5. **Call tree:** every path whose inclusive time rose is shown as a tree, so the chain from the engine loop through timers, Blueprint functions and event graphs down to the hot spot is visible.
 6. **What each scope is:** names resolve through Insights' own timer sources, a source index of engine and project code (cycle stats, quick scopes, CPU profiler scopes, named events, RDG passes, with the enclosing function), and the project's `Content` assets. Scopes are labelled C++, Blueprint function or event (with the owning Blueprint and asset path), object (Blueprint class or widget animation), UObject, GPU pass or wait. The engine index takes about 45 s on first use and is cached in `%LOCALAPPDATA%\ueperf`; `--reindex` rebuilds it.
-7. **Gains:** hot-spot rises on each gameplay over-budget frame, scaled so a frame never gives out more than its excess, are summed per call path and ranked. Frames in the first 2 seconds count as startup and are left out until lifecycle markers (milestone 5) separate loading properly.
+7. **Gains:** hot-spot rises on each gameplay over-budget frame, scaled so a frame never gives out more than its excess, are summed per call path and ranked. Startup and loading frames, by lifecycle phase, are left out; runs without markers fall back to skipping the first 2 seconds.
 
 The plugin turns on verbose named events, so the trace names more per-object work (component registration, widget animation instances).
 

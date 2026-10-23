@@ -1,0 +1,42 @@
+# Game profile for LoadedDiceFaceOff. Written during onboarding; the launcher
+# (milestone 7) reads the run settings, the plugin and analyzer read [[lifecycle]].
+
+project = "D:/UE5/LoadedDiceFaceOff/LoadedDiceFaceOff.uproject"
+version = 1
+maps = ["/Game/EvilLair"]                 # gameplay maps only, never menus or lobbies
+args = ["-nosteam", "-ini:Engine:[OnlineSubsystem]:DefaultPlatformService=Null"]
+budget_ms = 11.1
+runs = 3
+play_s = 30
+quit_on = "match_end"
+
+# Game-specific lifecycle events, detected without game code.
+# poll:  a bool property or parameterless bool function on GameMode, GameState,
+#        PlayerController or Pawn; fires when it turns true (plugin, at runtime)
+# spawn: an actor class name in the spawned actor's class chain (plugin, at runtime)
+# log:   text in a log line (plugin, at runtime)
+# scope: a trace scope name, such as a UFunction or RPC (analyzer, from the trace)
+
+[[lifecycle]]
+# AGameModeLoadedDice::StartGame spawns each player's dice when the countdown starts.
+name = "countdown_start"
+spawn = "BP_DiceActor_C"
+
+[[lifecycle]]
+# AGameModeLoadedDice::LaunchMatch calls this RPC on every controller.
+name = "match_start"
+scope = "Client_OnGameStarted"
+
+[[lifecycle]]
+# BlueprintPure AGameModeLoadedDice::IsMatchEnded turns true in EndMatch.
+name = "match_end"
+poll = "GameMode.IsMatchEnded"
+
+# Phase each marker starts. Frames before the first marker are "startup".
+# Startup and loading frames are kept out of baselines and the gains ranking.
+[phases]
+map_load_start = "loading"
+map_load_end = "in_map"
+countdown_start = "countdown"
+match_start = "match"
+match_end = "post_match"

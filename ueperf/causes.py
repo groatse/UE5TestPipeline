@@ -118,7 +118,7 @@ class CauseReport:
     trace_offset_s: float
     frames_read: int
     frames_over: int
-    startup_frames_over: int
+    non_gameplay_frames_over: int
     skip_start_s: float
     baseline_frames: int
     hitch_windows: list[tuple[float, float] | None] = field(default_factory=list)
@@ -394,10 +394,10 @@ def compute_report(
 
     # Gains: hot-spot rise on each gameplay over-budget frame, scaled so a frame never
     # gives out more credit than its excess, summed per path, scaled to all such frames.
-    start_ms = frames[0].t_ms + t.causes_skip_start_s * 1000.0 if frames else 0.0
-    gameplay_over = [i for i, f in enumerate(frames) if frame_cost(f) > t.budget_ms and f.t_ms >= start_ms]
+    gameplay = [analysis.is_gameplay(i, frames, t) for i in range(len(frames))]
+    gameplay_over = [i for i, f in enumerate(frames) if frame_cost(f) > t.budget_ms and gameplay[i]]
     startup_over = analysis.summary.frames_over - len(gameplay_over)
-    read = [i for i in over_read if i in per_frame and i not in baseline and frames[i].t_ms >= start_ms]
+    read = [i for i in over_read if i in per_frame and i not in baseline and gameplay[i]]
     scale = len(gameplay_over) / len(read) if read else 0.0
 
     credit: dict[PathKey, float] = defaultdict(float)
@@ -438,7 +438,7 @@ def compute_report(
         trace_offset_s=round(statistics.median(aligned), 6) if aligned else 0.0,
         frames_read=len(read),
         frames_over=len(gameplay_over),
-        startup_frames_over=startup_over,
+        non_gameplay_frames_over=startup_over,
         skip_start_s=t.causes_skip_start_s,
         baseline_frames=len([i for i in baseline if i in per_frame]),
         hitch_windows=hitch_windows,
@@ -456,8 +456,7 @@ def select_frames(frames: list[Frame], analysis: Analysis, t: Thresholds) -> tup
     hitch = {i for h in analysis.hitches for i in range(index_of[h.start_frame], index_of[h.end_frame] + 1)}
     over_read = sorted(set(evenly(over, t.causes_max_frames)) | hitch)
 
-    start_ms = frames[0].t_ms + t.causes_skip_start_s * 1000.0 if frames else 0.0
-    in_budget = [i for i, f in enumerate(frames) if frame_cost(f) <= t.budget_ms and f.t_ms >= start_ms]
+    in_budget = [i for i, f in enumerate(frames) if frame_cost(f) <= t.budget_ms and analysis.is_gameplay(i, frames, t)]
     # Keep away from the last frame, whose following tick may be missing.
     baseline = evenly([i for i in in_budget if i < len(frames) - 1], t.causes_baseline_frames)
     return over_read, baseline
@@ -473,10 +472,15 @@ def find_causes(
     index: SourceIndex | None = None,
     roots: list[FsPath] | None = None,
     project_dir: FsPath | None = None,
+    windows: list | None = None,
 ) -> CauseReport:
-    """Read the trace for the flagged and baseline frames and build the cause report."""
-    ticks = export_ticks(insights, trace, workdir)
-    windows = align_frames(frames, ticks)
+    """Read the trace for the flagged and baseline frames and build the cause report.
+
+    `windows` is each frame's tick on the trace clock, from `align_frames`; it is
+    exported and aligned here when not given.
+    """
+    if windows is None:
+        windows = align_frames(frames, export_ticks(insights, trace, workdir))
     timer_sources = export_timers(insights, trace, workdir)
     over_read, baseline = select_frames(frames, analysis, t)
     events = export_frame_events(insights, trace, windows, sorted(set(over_read) | set(baseline)), workdir)

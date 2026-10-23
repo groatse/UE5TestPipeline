@@ -1,6 +1,7 @@
 #include "PerfPipelineModule.h"
 
 #include "PerfFrameRecorder.h"
+#include "PerfLifecycle.h"
 #include "Misc/App.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
@@ -8,7 +9,6 @@
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "ProfilingDebugging/CsvProfilerConfig.h"
-#include "ProfilingDebugging/MiscTrace.h"
 #include "Trace/Trace.h"
 
 void FPerfPipelineModule::StartupModule()
@@ -21,6 +21,9 @@ void FPerfPipelineModule::StartupModule()
 	OutputFolder = FPaths::ConvertRelativePathToFull(OutputFolder);
 
 	FParse::Value(FCommandLine::Get(), TEXT("-PerfQuitAfter="), QuitAfterSeconds);
+	FString EventsFile, QuitOn;
+	FParse::Value(FCommandLine::Get(), TEXT("-PerfEvents="), EventsFile);
+	FParse::Value(FCommandLine::Get(), TEXT("-PerfQuitOn="), QuitOn);
 	StartSeconds = FPlatformTime::Seconds();
 
 	Recorder = MakeUnique<FPerfFrameRecorder>(OutputFolder);
@@ -46,8 +49,8 @@ void FPerfPipelineModule::StartupModule()
 		FCommandLine::Get());
 	FFileHelper::SaveStringToFile(Info, *FPaths::Combine(OutputFolder, TEXT("run_info.txt")));
 
-	TRACE_BOOKMARK(TEXT("run_start"));
-	UE_LOG(LogTemp, Log, TEXT("PerfPipeline: run_start, writing to %s"), *OutputFolder);
+	Lifecycle = MakeUnique<FPerfLifecycle>(*Recorder, FPaths::ConvertRelativePathToFull(EventsFile), QuitOn);
+	UE_LOG(LogTemp, Log, TEXT("PerfPipeline: recording to %s"), *OutputFolder);
 
 	TickHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FPerfPipelineModule::Tick));
 }
@@ -55,21 +58,29 @@ void FPerfPipelineModule::StartupModule()
 void FPerfPipelineModule::ShutdownModule()
 {
 	FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
-	if (Recorder.IsValid())
-	{
-		TRACE_BOOKMARK(TEXT("run_end"));
-		Recorder.Reset();
-	}
+	StopRecording();
+}
+
+void FPerfPipelineModule::StopRecording()
+{
+	// The lifecycle fires run_end into the recorder, so it goes first.
+	Lifecycle.Reset();
+	Recorder.Reset();
 }
 
 bool FPerfPipelineModule::Tick(float DeltaTime)
 {
-	if (QuitAfterSeconds > 0.0 && !bQuitRequested && FPlatformTime::Seconds() - StartSeconds >= QuitAfterSeconds)
+	if (bQuitRequested || !Recorder.IsValid())
+	{
+		return true;
+	}
+	const bool bTimeUp = QuitAfterSeconds > 0.0 && FPlatformTime::Seconds() - StartSeconds >= QuitAfterSeconds;
+	const bool bMarker = Lifecycle.IsValid() && Lifecycle->QuitRequested();
+	if (bTimeUp || bMarker)
 	{
 		bQuitRequested = true;
-		TRACE_BOOKMARK(TEXT("run_end"));
-		Recorder.Reset();
-		UE_LOG(LogTemp, Log, TEXT("PerfPipeline: run_end, quitting"));
+		UE_LOG(LogTemp, Log, TEXT("PerfPipeline: quitting (%s)"), bMarker ? TEXT("quit marker") : TEXT("time up"));
+		StopRecording();
 		FPlatformMisc::RequestExit(false, TEXT("PerfPipeline"));
 	}
 	return true;

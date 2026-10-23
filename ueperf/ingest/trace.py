@@ -78,15 +78,30 @@ def _read_events(path: Path) -> list[Event]:
 
 def export_ticks(insights: Path, trace: Path, workdir: Path) -> list[FrameWindow]:
     """Every top-level game thread tick in the trace, in order."""
-    out = workdir / "ticks.csv"
-    run_commands(insights, trace, [
-        f"TimingInsights.ExportTimingEvents {out} -columns={EVENT_COLUMNS} -threads=GameThread -timers={TICK_TIMER}",
-    ], workdir)
-    if not out.exists():
+    return export_ticks_and_scopes(insights, trace, workdir, [])[0]
+
+
+def export_ticks_and_scopes(
+    insights: Path, trace: Path, workdir: Path, scopes: list[str],
+) -> tuple[list[FrameWindow], dict[str, list[float]]]:
+    """Game thread ticks, and the start times of the named scopes on any thread, in one Insights run."""
+    ticks_out = workdir / "ticks.csv"
+    scopes_out = workdir / "scopes.csv"
+    commands = [f"TimingInsights.ExportTimingEvents {ticks_out} -columns={EVENT_COLUMNS} -threads=GameThread -timers={TICK_TIMER}"]
+    if scopes:
+        commands.append(f"TimingInsights.ExportTimingEvents {scopes_out} -columns={EVENT_COLUMNS} -timers={','.join(scopes)}")
+    run_commands(insights, trace, commands, workdir)
+    if not ticks_out.exists():
         raise InsightsError(f"Insights wrote no tick export; see {workdir / 'insights.log'}")
-    events = [e for e in _read_events(out) if e.depth == 0 and e.timer == TICK_TIMER]
+
+    events = [e for e in _read_events(ticks_out) if e.depth == 0 and e.timer == TICK_TIMER]
     events.sort(key=lambda e: e.start_s)
-    return [FrameWindow(e.start_s, e.end_s) for e in events]
+    times: dict[str, list[float]] = defaultdict(list)
+    if scopes and scopes_out.exists():
+        for e in _read_events(scopes_out):
+            if e.timer in scopes:
+                times[e.timer].append(e.start_s)
+    return [FrameWindow(e.start_s, e.end_s) for e in events], dict(times)
 
 
 def align_frames(frames: list[Frame], ticks: list[FrameWindow]) -> list[FrameWindow | None]:

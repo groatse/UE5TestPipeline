@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from ueperf.ingest.frames import Frame, load_frames
+from ueperf.phases import NON_GAMEPLAY
 from ueperf.report.causes_html import STYLE as CAUSE_STYLE
 from ueperf.report.causes_html import gains_html, hitch_groups_html, hitches_html, overruns_html
 
@@ -178,13 +179,25 @@ def _frame_chart(frames, analysis, causes, budget) -> str:
     s = _Scale(t0, t1, y_max)
     parts = [f'<svg viewBox="0 0 {CHART_W} {CHART_H}" role="img" aria-label="Frame time over the run against the budget">']
 
-    startup_end = t0 + (causes.get("skip_start_s", 2.0) if causes else 0.0)
-    if causes is not None:
-        start_x = s.x(startup_end)
-        worst = max((f.frame_ms for f in frames if f.t_ms / 1000.0 < startup_end), default=0.0)
-        parts.append(f'<rect x="{s.x0}" y="{s.y1}" width="{start_x - s.x0:.1f}" height="{s.y0 - s.y1}" fill="var(--band)"/>')
-        parts.append(f'<text x="{start_x + 4:.1f}" y="{s.y1 + 12}" font-size="11" fill="var(--text-secondary)">'
-                     f'startup, worst {worst:.0f} ms</text>')
+    phases = analysis.get("phases") or []
+    if phases:
+        # Bands per phase: startup and loading shaded, every phase named along the top.
+        for k, p in enumerate(phases):
+            xa = s.x(p["start_ms"] / 1000.0)
+            xb = s.x(phases[k + 1]["start_ms"] / 1000.0) if k + 1 < len(phases) else s.x1
+            if p["phase"] in NON_GAMEPLAY:
+                parts.append(f'<rect x="{xa:.1f}" y="{s.y1}" width="{max(xb - xa, 1):.1f}" height="{s.y0 - s.y1}" fill="var(--band)"/>')
+            parts.append(f'<text x="{xa + 4:.1f}" y="{s.y1 + 12}" font-size="11" fill="var(--text-secondary)">{_e(p["phase"])}</text>')
+        gameplay_from = next((p["start_ms"] / 1000.0 for p in phases if p["phase"] not in NON_GAMEPLAY), t1)
+        startup_end = gameplay_from
+    else:
+        startup_end = t0 + (causes.get("skip_start_s", 2.0) if causes else 0.0)
+        if causes is not None:
+            start_x = s.x(startup_end)
+            worst = max((f.frame_ms for f in frames if f.t_ms / 1000.0 < startup_end), default=0.0)
+            parts.append(f'<rect x="{s.x0}" y="{s.y1}" width="{start_x - s.x0:.1f}" height="{s.y0 - s.y1}" fill="var(--band)"/>')
+            parts.append(f'<text x="{start_x + 4:.1f}" y="{s.y1 + 12}" font-size="11" fill="var(--text-secondary)">'
+                         f'startup, worst {worst:.0f} ms</text>')
     for o in analysis["overruns"]:
         xa, xb = s.x(o["start_ms"] / 1000.0), s.x(o["end_ms"] / 1000.0)
         parts.append(f'<rect x="{xa:.1f}" y="{s.y1}" width="{max(xb - xa, 2):.1f}" height="{s.y0 - s.y1}" fill="var(--overrun)"/>')
@@ -195,6 +208,19 @@ def _frame_chart(frames, analysis, causes, budget) -> str:
                  f'stroke-width="1" stroke-dasharray="4 4"/>')
     parts.append(f'<text x="{s.x1 - 4}" y="{yb - 5:.1f}" text-anchor="end" font-size="11" '
                  f'fill="var(--text-secondary)">budget {budget:g} ms</text>')
+    # Lifecycle markers: a hairline each, labels stacked in three rows so neighbours don't collide.
+    last_x = [-1e9, -1e9, -1e9]
+    for m in analysis.get("markers") or []:
+        if m["name"] in ("run_start", "run_end"):
+            continue
+        x = s.x(m["t_ms"] / 1000.0)
+        parts.append(f'<g><title>{_e(m["name"])} {_e(m["detail"])} at {m["t_ms"] / 1000:.2f} s</title>'
+                     f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{s.y1}" y2="{s.y0}" stroke="var(--muted)" stroke-width="1" '
+                     f'stroke-dasharray="2 3"/></g>')
+        row = next((r for r in range(3) if x - last_x[r] > 90), None)
+        if row is not None:  # no free row: the hover title still names it
+            last_x[row] = x
+            parts.append(f'<text x="{x + 3:.1f}" y="{s.y0 - 6 - row * 13}" font-size="10" fill="var(--muted)">{_e(m["name"])}</text>')
     parts.append(_polyline(frames, s, lambda f: f.frame_ms, "var(--series-1)"))
 
     for n, h in enumerate(analysis["hitches"], 1):
@@ -218,7 +244,8 @@ def _frame_chart(frames, analysis, causes, budget) -> str:
               '<span><i style="background:none;border-top:1px dashed var(--text-secondary)"></i>Budget</span>'
               '<span><i class="dot" style="background:var(--critical)"></i>Hitch</span>'
               '<span><i class="box" style="background:var(--overrun)"></i>Sustained overrun</span>'
-              '<span><i class="box" style="background:var(--band)"></i>Startup</span></div>')
+              '<span><i class="box" style="background:var(--band)"></i>Startup or loading</span>'
+              '<span><i style="background:none;border-top:1px dotted var(--muted)"></i>Lifecycle marker</span></div>')
     note = f'<p class="note">Frames above {y_max:.0f} ms are drawn at the top edge; their value is printed beside them.</p>'
     return (f'<div class="card" data-chart="frames">{legend}{"".join(parts)}<div class="tip"></div>'
             f'<script type="application/json">{blob}</script></div>{note}')
@@ -241,6 +268,25 @@ def _thread_chart(frames, analysis, budget) -> str:
     blob = _data_blob(frames, s, 0.0, ["frame_ms", "game_ms", "render_ms", "rhi_ms", "gpu_ms"])
     return (f'<div class="card" data-chart="threads">{legend}{"".join(parts)}<div class="tip"></div>'
             f'<script type="application/json">{blob}</script></div>')
+
+
+def _phases_table(analysis) -> str:
+    phases, markers = analysis.get("phases") or [], analysis.get("markers") or []
+    if not phases:
+        return ""
+    rows = "".join(
+        f'<tr><td>{_e(p["phase"])}</td><td class="n">{p["start_ms"] / 1000:.2f}</td><td class="n">{p["duration_s"]:.1f}</td>'
+        f'<td class="n">{p["frames"]}</td><td class="n">{p["median_ms"]:.2f}</td><td class="n">{p["p95_ms"]:.2f}</td>'
+        f'<td class="n">{p["p99_ms"]:.2f}</td><td class="n">{p["frames_over"]}</td></tr>' for p in phases)
+    marker_rows = "".join(
+        f'<tr><td class="n">{m["t_ms"] / 1000:.2f}</td><td class="n">{m["frame"]}</td><td><code>{_e(m["name"])}</code></td>'
+        f'<td>{_e(m["detail"])}</td><td>{"trace scope" if m["source"] == "trace" else "plugin"}</td></tr>' for m in markers)
+    return ('<h2>Lifecycle phases</h2><div class="scroll"><table><thead><tr><th>Phase</th><th class="n">From s</th>'
+            '<th class="n">Length s</th><th class="n">Frames</th><th class="n">Median ms</th><th class="n">p95</th>'
+            f'<th class="n">p99</th><th class="n">Over budget</th></tr></thead><tbody>{rows}</tbody></table></div>'
+            '<details><summary>Lifecycle markers</summary><div class="scroll"><table><thead><tr><th class="n">Run s</th>'
+            '<th class="n">Frame</th><th>Marker</th><th>Detail</th><th>Found by</th></tr></thead>'
+            f'<tbody>{marker_rows}</tbody></table></div></details>')
 
 
 def _tiles(summary, n_hitches, n_overruns) -> str:
@@ -294,6 +340,7 @@ def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str 
         _tiles(summary, len(analysis["hitches"]), len(analysis["overruns"])),
         '<h2>Frame time</h2>', _frame_chart(frames, analysis, causes, budget),
         '<h2>Thread and GPU time per frame</h2>', _thread_chart(frames, analysis, budget),
+        _phases_table(analysis),
         '<h2>Hitches</h2>', trace_note, hitches_html(analysis, causes), hitch_groups_html(causes),
         '<h2>Sustained overruns</h2>', overruns_html(analysis, causes),
     ]
@@ -301,8 +348,8 @@ def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str 
         sections += ['<h2>Gains ranking</h2>',
                      f'<p class="note">Hot spots across {causes["frames_read"]} of {causes["frames_over"]} gameplay '
                      'over-budget frames: each one\'s own rise over its usual cost, scaled so a frame never gives out more '
-                     f'than its excess, summed over the run. {causes["startup_frames_over"]} over-budget frames in the first '
-                     f'{causes["skip_start_s"]:g} s count as startup and are left out.</p>', gains_html(causes)]
+                     f'than its excess, summed over the run. {causes["non_gameplay_frames_over"]} over-budget frames '
+                     'during startup or loading are left out.</p>', gains_html(causes)]
     else:
         sections += ['<h2>Gains ranking</h2>', '<p class="note">No trace was analyzed for this run.</p>']
     if run_info:

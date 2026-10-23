@@ -93,6 +93,16 @@ def explanation_html(title: str, meta: str, expl: dict | None) -> str:
     return f'<div class="expl"><h3>{_e(title)}</h3><p class="meta">{meta}</p>{body}</div>'
 
 
+def _context(item: dict) -> str:
+    """Phase and the latest lifecycle marker before a hitch or overrun."""
+    parts = []
+    if item.get("phase"):
+        parts.append(f'phase {_e(item["phase"])}')
+    if item.get("after_marker"):
+        parts.append(f'{item["after_marker_s"]:.2f} s after <code>{_e(item["after_marker"])}</code>')
+    return (" · " + ", ".join(parts)) if parts else ""
+
+
 def hitches_html(analysis: dict, causes: dict | None) -> str:
     if not analysis["hitches"]:
         return '<p class="note">No hitches.</p>'
@@ -102,7 +112,8 @@ def hitches_html(analysis: dict, causes: dict | None) -> str:
         at = f' · trace {window[0]:.3f} to {window[1]:.3f} s' if window else ""
         meta = (f'run {h["start_ms"] / 1000:.2f} s{at} · frame {h["start_frame"]}'
                 + (f'-{h["end_frame"]}' if h["end_frame"] != h["start_frame"] else "")
-                + f' · {h["peak_ms"]:.1f} ms vs usual {h["baseline_ms"]:.1f} ms · stall {h["stall_ms"]:.1f} ms · {_e(h["bound"])}-bound')
+                + f' · {h["peak_ms"]:.1f} ms vs usual {h["baseline_ms"]:.1f} ms · stall {h["stall_ms"]:.1f} ms · {_e(h["bound"])}-bound'
+                + _context(h))
         out.append(explanation_html(f"H{n}", meta, causes["hitches"][n - 1] if causes else None))
     return "".join(out)
 
@@ -114,7 +125,7 @@ def overruns_html(analysis: dict, causes: dict | None) -> str:
     for n, o in enumerate(analysis["overruns"], 1):
         meta = (f'run {o["start_ms"] / 1000:.2f} to {o["end_ms"] / 1000:.2f} s · {o["frames_over"]} of {o["frames"]} frames '
                 f'over · excess {o["total_excess_ms"]:.1f} ms · peak {o["peak_ms"]:.1f} ms · {_e(o["bound"])}-bound · '
-                'times are per frame, averaged')
+                'times are per frame, averaged' + _context(o))
         out.append(explanation_html(f"O{n}", meta, causes["overruns"][n - 1] if causes else None))
     return "".join(out)
 

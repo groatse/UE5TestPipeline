@@ -11,7 +11,10 @@ from ueperf.analyze import Analysis, analyze
 from ueperf.causes import CauseReport, find_causes
 from ueperf.config import load_thresholds
 from ueperf.ingest.frames import load_frames
+from ueperf.ingest.markers import load_markers, markers_from_trace_times
+from ueperf.ingest.trace import align_frames, export_ticks_and_scopes
 from ueperf.insights import InsightsError, find_insights
+from ueperf.profile import DEFAULT_PHASES, load_profile
 from ueperf.report import write_report
 from ueperf.source_index import load_or_build
 
@@ -35,8 +38,9 @@ def _print_analysis(result: Analysis) -> None:
 
     print(f"\nHitches: {len(result.hitches)}")
     for h in result.hitches:
+        context = f"  [{h.phase}, {h.after_marker_s:.2f} s after {h.after_marker}]" if h.after_marker else ""
         print(f"  frames {h.start_frame}-{h.end_frame}  {h.start_ms / 1000:.2f} s  "
-              f"peak {h.peak_ms:.1f} ms vs {h.baseline_ms:.1f} ms  stall {h.stall_ms:.1f} ms  {h.bound}")
+              f"peak {h.peak_ms:.1f} ms vs {h.baseline_ms:.1f} ms  stall {h.stall_ms:.1f} ms  {h.bound}{context}")
 
 
 KIND_LABEL = {"cpp": "C++", "stat": "C++ stat", "gpu": "GPU pass", "object": "object", "blueprint": "Blueprint",
@@ -70,7 +74,7 @@ def _print_explanation(expl, indent: str = "    ") -> None:
 
 def _print_causes(result: Analysis, report: CauseReport) -> None:
     print(f"\nTrace: {report.frames_read} of {report.frames_over} gameplay over-budget frames read "
-          f"({report.startup_frames_over} more during startup), {report.baseline_frames} baseline frames, "
+          f"({report.non_gameplay_frames_over} more during startup or loading),{report.baseline_frames} baseline frames, "
           f"trace clock +{report.trace_offset_s:.3f} s")
 
     for n, (h, expl, window) in enumerate(zip(result.hitches, report.hitches, report.hitch_windows), 1):
@@ -88,6 +92,19 @@ def _print_causes(result: Analysis, report: CauseReport) -> None:
         print(f"      {g.frames} frames, worst at {where}; path: {' > '.join(g.path)}")
 
 
+def _print_phases(result: Analysis) -> None:
+    if not result.markers:
+        return
+    print("\nLifecycle markers:")
+    for m in result.markers:
+        src = " (from trace)" if m.source == "trace" else ""
+        print(f"  {m.t_ms / 1000:7.2f} s  frame {m.frame:<6} {m.name}  {m.detail}{src}")
+    print("\nPhases:")
+    for p in result.phases:
+        print(f"  {p.phase:<12} from {p.start_ms / 1000:6.2f} s  {p.frames:>6} frames  median {p.median_ms:.2f}  "
+              f"p95 {p.p95_ms:.2f}  p99 {p.p99_ms:.2f} ms  {p.frames_over} over budget")
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     # Absolute, because Unreal Insights resolves relative paths against its own folder.
     run = Path(args.run).resolve()
@@ -96,26 +113,49 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print(f"No frames.csv in {run}", file=sys.stderr)
         return 1
 
-    thresholds = load_thresholds(args.thresholds, budget_ms=args.budget_ms)
+    profile = load_profile(args.profile) if args.profile else None
+    budget = args.budget_ms if args.budget_ms is not None else (profile.budget_ms if profile else None)
+    thresholds = load_thresholds(args.thresholds, budget_ms=budget)
     frames = load_frames(frames_path)
-    result = analyze(frames, thresholds)
-    output = result.to_dict()
-    _print_analysis(result)
+    markers = load_markers(run / "markers.csv")
+    phase_map = profile.phases if profile else DEFAULT_PHASES
+    project = Path(args.project).resolve() if args.project else (profile.project_dir if profile else None)
 
     trace = run / "capture.utrace"
+    use_trace = not args.no_trace and trace.exists()
+    windows, insights = None, None
+    if use_trace:
+        try:
+            insights = find_insights(args.insights)
+            scope_events = profile.scope_events() if profile else []
+            print(f"Reading ticks{' and lifecycle scopes' if scope_events else ''} from the trace ...")
+            ticks, scope_times = export_ticks_and_scopes(
+                insights, trace, run / "trace_export", [e["scope"] for e in scope_events])
+            windows = align_frames(frames, ticks)
+            markers += markers_from_trace_times(
+                scope_times, {e["scope"]: e["name"] for e in scope_events}, frames, windows,
+                {e["scope"]: bool(e.get("repeat")) for e in scope_events})
+        except InsightsError as e:
+            print(f"\nReading the trace failed: {e}", file=sys.stderr)
+            return 1
+
+    result = analyze(frames, thresholds, markers, phase_map)
+    output = result.to_dict()
+    _print_analysis(result)
+    _print_phases(result)
+
     if args.no_trace:
         pass
-    elif not trace.exists():
+    elif not use_trace:
         print(f"\nNo capture.utrace in {run}; skipping cause finding.")
     else:
         try:
-            insights = find_insights(args.insights)
             engine = insights.parents[3]
-            project = Path(args.project).resolve() if args.project else None
             index = load_or_build(engine, project, rebuild=args.reindex)
             roots = [r for r in (project, engine) if r]
-            print(f"\nReading the trace with {insights} ...")
-            report = find_causes(frames, result, trace, insights, run / "trace_export", thresholds, index, roots, project)
+            print(f"\nReading flagged frames from the trace with {insights} ...")
+            report = find_causes(frames, result, trace, insights, run / "trace_export", thresholds, index, roots,
+                                 project, windows)
         except InsightsError as e:
             print(f"\nCause finding failed: {e}", file=sys.stderr)
             return 1
@@ -126,6 +166,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     out.write_text(json.dumps(output, indent=2), encoding="utf-8")
     print(f"\nWrote {out}")
     print(f"Wrote {write_report(run)}")
+    return 0
+
+
+def cmd_events(args: argparse.Namespace) -> int:
+    out = load_profile(args.profile).write_events_json(Path(args.out))
+    print(f"Wrote {out}")
     return 0
 
 
@@ -151,7 +197,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--project", type=Path, default=None,
                    help="project folder, so scopes in game code resolve to its source")
     p.add_argument("--reindex", action="store_true", help="rebuild the cached engine source index")
+    p.add_argument("--profile", type=Path, default=None,
+                   help="game profile: budget, project folder, lifecycle scopes and phases")
     p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("events", help="write the plugin's -PerfEvents file from a game profile")
+    p.add_argument("profile", type=Path, help="game profile TOML")
+    p.add_argument("out", type=Path, help="JSON file to write")
+    p.set_defaults(func=cmd_events)
 
     p = sub.add_parser("report", help="write report.html from a run folder's analysis.json")
     p.add_argument("run", help="run folder containing analysis.json and frames.csv")

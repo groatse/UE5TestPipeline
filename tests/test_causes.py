@@ -115,7 +115,7 @@ def test_gains_are_hot_spot_paths_capped_at_excess_and_skip_startup():
     per_frame[50] = {("game", ("Tick", "Load")): [25.0, 25.0]}
     report = compute_report(frames, analysis, per_frame, baseline, over_read, windows, resolver(), t)
 
-    assert report.startup_frames_over == 1 and report.frames_over == 1
+    assert report.non_gameplay_frames_over == 1 and report.frames_over == 1
     gains = {tuple(g.path): g.credit_ms for g in report.gains}
     assert gains[("Tick", "Work")] == pytest.approx(15.0 - 11.1)  # rise of 8 ms capped at the excess
     assert ("Tick", "Load") not in gains

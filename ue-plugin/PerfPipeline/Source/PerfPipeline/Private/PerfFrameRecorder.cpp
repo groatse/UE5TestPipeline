@@ -47,8 +47,23 @@ void FPerfFrameRecorder::OnEndFrame()
 		CyclesToMs(RHIGetGPUFrameCycles(0))});
 }
 
+void FPerfFrameRecorder::AddMarker(const FString& Name, const FString& Detail)
+{
+	Markers.Add({GFrameCounter - FirstFrame, (FPlatformTime::Seconds() - StartSeconds) * 1000.0, Name, Detail});
+}
+
 void FPerfFrameRecorder::Write() const
 {
+	FString MarkerCsv = TEXT("frame,t_ms,name,detail\n");
+	for (const FMarker& Marker : Markers)
+	{
+		// Details are free text (map paths, class names); keep the CSV one line per marker.
+		const FString Detail = Marker.Detail.Replace(TEXT("\""), TEXT("'")).Replace(TEXT("\n"), TEXT(" "));
+		MarkerCsv += FString::Printf(TEXT("%llu,%.3f,%s,\"%s\"\n"), Marker.Frame, Marker.TimeMs, *Marker.Name, *Detail);
+	}
+	FFileHelper::SaveStringToFile(MarkerCsv, *FPaths::Combine(OutputFolder, TEXT("markers.csv")),
+		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+
 	FString Csv;
 	Csv.Reserve(Rows.Num() * 64);
 	Csv += TEXT("frame,t_ms,frame_ms,game_ms,render_ms,rhi_ms,gpu_ms\n");
