@@ -38,6 +38,9 @@ public:
 	~FPerfLifecycle();
 
 	void Fire(const FString& Name, const FString& Detail = FString());
+
+	/** Broadcast with the marker name after each marker is recorded. */
+	TMulticastDelegate<void(const FString&)> OnMarker;
 	bool QuitRequested() const { return bQuitRequested; }
 
 private:

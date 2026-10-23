@@ -180,6 +180,7 @@ void FPerfLifecycle::Fire(const FString& Name, const FString& Detail)
 	Recorder.AddMarker(Name, Detail);
 	TRACE_BOOKMARK(TEXT("PerfMarker %s %s"), *Name, *Detail);
 	UE_LOG(LogTemp, Log, TEXT("PerfPipeline: marker %s %s"), *Name, *Detail);
+	OnMarker.Broadcast(Name);
 
 	if (!QuitOn.IsEmpty() && Name == QuitOn && !bQuitRequested)
 	{

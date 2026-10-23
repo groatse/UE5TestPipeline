@@ -1,5 +1,5 @@
-# Game profile for LoadedDiceFaceOff. Written during onboarding; the launcher
-# (milestone 7) reads the run settings, the plugin and analyzer read [[lifecycle]].
+# Game profile for LoadedDiceFaceOff. Written during onboarding; `ueperf run` reads
+# the run settings, the plugin reads [input] and [[lifecycle]], the analyzer [phases].
 
 project = "D:/UE5/LoadedDiceFaceOff/LoadedDiceFaceOff.uproject"
 version = 1
@@ -9,6 +9,21 @@ budget_ms = 11.1
 runs = 3
 play_s = 30
 quit_on = "match_end"
+build = "D:/UE5/PerfBuilds/LoadedDiceFaceOff/Windows/LoadedDiceFaceOff.exe"
+resolution = [1920, 1080]
+screenshot_every_s = 30
+
+# How the plugin's input driver plays. Actions are found at runtime from the
+# player's mapping contexts and input components; nothing here lists them.
+# APawnLoadedDice binds the Play_* actions in Content/ControllerModeAndInstance/Inputs
+# (PawnLoadedDice.cpp:75); Play_AccessMenu comes from Play_IMC.
+[input]
+start_on = "pawn_possessed"       # the pawn adds its mapping context when possessed
+start_delay_s = 1.0
+exclude = ["*Voice*", "*Mute*"]   # voice chat needs Steam; Play_AccessMenu is left out by the default "*Menu*"
+voices = 2
+[input.weights]
+Play_Look = 3
 
 # Game-specific lifecycle events, detected without game code.
 # poll:  a bool property or parameterless bool function on GameMode, GameState,

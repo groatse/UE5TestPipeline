@@ -3,9 +3,15 @@
 	"Version": 1,
 	"VersionName": "0.1",
 	"FriendlyName": "PerfPipeline",
-	"Description": "Automated performance playtests: frame recording, lifecycle markers and capture control.",
+	"Description": "Automated performance playtests: input driver, frame recording, lifecycle markers and capture control.",
 	"Category": "Performance",
 	"CanContainContent": false,
+	"Plugins": [
+		{
+			"Name": "EnhancedInput",
+			"Enabled": true
+		}
+	],
 	"Modules": [
 		{
 			"Name": "PerfPipeline",

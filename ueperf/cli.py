@@ -1,4 +1,4 @@
-"""Command line: ueperf analyze <run folder>."""
+"""Command line: ueperf run, analyze, report, send, status and events."""
 
 from __future__ import annotations
 
@@ -11,10 +11,13 @@ from ueperf.analyze import Analysis, analyze
 from ueperf.causes import CauseReport, find_causes
 from ueperf.config import load_thresholds
 from ueperf.ingest.frames import load_frames
+from ueperf.ingest.inputs import load_coverage, load_inputs
 from ueperf.ingest.markers import load_markers, markers_from_trace_times
 from ueperf.ingest.trace import align_frames, export_ticks_and_scopes
 from ueperf.insights import InsightsError, find_insights
+from ueperf.launcher import latest_run, read_status, run_playtest, screenshot_times, send_command
 from ueperf.loading import read_run_info
+from ueperf.onboard import draft_profile
 from ueperf.profile import DEFAULT_PHASES, load_profile
 from ueperf.report import write_report
 from ueperf.source_index import load_or_build
@@ -42,6 +45,23 @@ def _print_analysis(result: Analysis) -> None:
         context = f"  [{h.phase}, {h.after_marker_s:.2f} s after {h.after_marker}]" if h.after_marker else ""
         print(f"  frames {h.start_frame}-{h.end_frame}  {h.start_ms / 1000:.2f} s  "
               f"peak {h.peak_ms:.1f} ms vs {h.baseline_ms:.1f} ms  stall {h.stall_ms:.1f} ms  {h.bound}{context}")
+        if h.inputs:
+            print(f"    input: {'; '.join(h.inputs)}")
+        if h.screenshot_s is not None:
+            print(f"    a launcher screenshot was taken {h.screenshot_s:+.2f} s from it")
+
+
+def _print_coverage(result: Analysis) -> None:
+    cov = result.coverage
+    if not cov:
+        return
+    print(f"\nInput coverage: {cov['fired']} of {cov['allowed']} allowed actions fired "
+          f"({cov['input_system']} input, seed {cov['seed']})")
+    for a in cov["actions"]:
+        state = "excluded" if a["excluded"] else ("never fired" if a["fired"] == 0 else f"{a['fired']} times")
+        print(f"  {a['name']:<28} {a['value_type']:<7} {a['keys']:<24} {state}")
+    for c in result.agent_commands:
+        print(f"  agent at {c['t_ms'] / 1000:.2f} s: {c['command']}")
 
 
 KIND_LABEL = {"cpp": "C++", "stat": "C++ stat", "gpu": "GPU pass", "object": "object", "blueprint": "Blueprint",
@@ -160,9 +180,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             print(f"\nReading the trace failed: {e}", file=sys.stderr)
             return 1
 
-    result = analyze(frames, thresholds, markers, phase_map, read_run_info(run / "run_info.txt"))
+    run_info = read_run_info(run / "run_info.txt")
+    result = analyze(frames, thresholds, markers, phase_map, run_info,
+                     load_inputs(run / "inputs.csv"), load_coverage(run / "actions.csv"), screenshot_times(run, run_info))
     output = result.to_dict()
     _print_analysis(result)
+    _print_coverage(result)
     _print_loading(result)
     _print_phases(result)
 
@@ -188,6 +211,77 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     out.write_text(json.dumps(output, indent=2), encoding="utf-8")
     print(f"\nWrote {out}")
     print(f"Wrote {write_report(run)}")
+    return 0
+
+
+RUNS_ROOT = Path(__file__).resolve().parent.parent / "runs"
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    profile = load_profile(args.profile)
+    count = args.runs if args.runs is not None else profile.runs
+    failed = 0
+    for n in range(1, count + 1):
+        print(f"\n=== Run {n} of {count} ===")
+        try:
+            result = run_playtest(profile, Path(args.runs_root), game_map=args.map, play_s=args.play_s, exe=args.build,
+                                  trace=not args.no_trace)
+        except FileNotFoundError as e:
+            print(e, file=sys.stderr)
+            return 1
+        if not (result.run / "frames.csv").exists():
+            print(f"No frames.csv in {result.run}; the plugin did not record this run.", file=sys.stderr)
+            failed += 1
+            continue
+        if not args.no_analyze:
+            code = cmd_analyze(argparse.Namespace(
+                run=str(result.run), profile=args.profile, budget_ms=args.budget_ms, thresholds=args.thresholds,
+                no_trace=args.no_trace, insights=args.insights, project=None, reindex=False))
+            failed += code != 0
+    return 1 if failed else 0
+
+
+def _run_arg(run: str | None) -> Path | None:
+    path = Path(run) if run else latest_run(RUNS_ROOT)
+    if path is None or not path.exists():
+        print("No run folder given and no latest run found.", file=sys.stderr)
+        return None
+    return path.resolve()
+
+
+def cmd_send(args: argparse.Namespace) -> int:
+    run = _run_arg(args.run)
+    if run is None:
+        return 1
+    send_command(run, " ".join(args.command))
+    print(f"Sent '{' '.join(args.command)}' to {run.name}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    run = _run_arg(args.run)
+    if run is None:
+        return 1
+    meta = json.loads((run / "run.json").read_text(encoding="utf-8")) if (run / "run.json").exists() else {}
+    print(f"{run}  {meta.get('state', '?')}{'  ended: ' + meta['ended'] if meta.get('ended') else ''}")
+    print(json.dumps(read_status(run), indent=2))
+    shots = sorted((run / "screens").glob("*.png"))
+    if shots:
+        print(f"latest screenshot: {shots[-1]}")
+    for line in meta.get("attention", []):
+        print(line)
+    return 0
+
+
+def cmd_onboard(args: argparse.Namespace) -> int:
+    project = Path(args.project)
+    out = Path(args.out) if args.out else Path(__file__).resolve().parent.parent / "profiles" / f"{project.stem}.toml"
+    if out.exists() and not args.force:
+        print(f"{out} exists; pass --force to replace it, or --out for another file", file=sys.stderr)
+        return 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(draft_profile(project), encoding="utf-8")
+    print(f"Wrote {out}; settle its TODOs, then run a short trial with ueperf run")
     return 0
 
 
@@ -222,6 +316,36 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--profile", type=Path, default=None,
                    help="game profile: budget, project folder, lifecycle scopes and phases")
     p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("run", help="play the game with the profile's input rules, capture and analyze")
+    p.add_argument("profile", type=Path, help="game profile TOML")
+    p.add_argument("--runs", type=int, default=None, help="number of runs (default: the profile's runs)")
+    p.add_argument("--play-s", type=float, default=None, help="seconds of play per run (default: the profile's play_s)")
+    p.add_argument("--map", default=None, help="map to start in (default: the profile's first map)")
+    p.add_argument("--build", type=Path, default=None, help="packaged game executable (default: the profile's build)")
+    p.add_argument("--runs-root", type=Path, default=RUNS_ROOT, help="folder for run folders")
+    p.add_argument("--no-trace", action="store_true", help="record frames only, no Insights trace")
+    p.add_argument("--no-analyze", action="store_true", help="skip analysis after each run")
+    p.add_argument("--budget-ms", type=float, default=None, help="frame budget in ms for analysis")
+    p.add_argument("--thresholds", type=Path, default=None, help="thresholds TOML file")
+    p.add_argument("--insights", type=Path, default=None, help="path to UnrealInsights.exe")
+    p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("send", help="send a command to the input driver of a running playtest")
+    p.add_argument("command", nargs="+", help="pause, resume, key <Key> [s], click <x> <y>, type <text>, "
+                                              "action <Name> [s], exec <console command> or quit")
+    p.add_argument("--run", default=None, help="run folder (default: the latest run)")
+    p.set_defaults(func=cmd_send)
+
+    p = sub.add_parser("status", help="show a playtest's live status and latest screenshot")
+    p.add_argument("run", nargs="?", default=None, help="run folder (default: the latest run)")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("onboard", help="draft a game profile from a project's files")
+    p.add_argument("project", type=Path, help="the project's .uproject")
+    p.add_argument("--out", default=None, help="profile to write (default: profiles/<project>.toml)")
+    p.add_argument("--force", action="store_true", help="replace an existing profile")
+    p.set_defaults(func=cmd_onboard)
 
     p = sub.add_parser("events", help="write the plugin's -PerfEvents file from a game profile")
     p.add_argument("profile", type=Path, help="game profile TOML")

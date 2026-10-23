@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field, replace
 
 from ueperf.config import Thresholds
 from ueperf.ingest.frames import Frame
+from ueperf.ingest.inputs import AGENT, Coverage, InputEvent, active_between, describe
 from ueperf.ingest.markers import Marker
 from ueperf.loading import Loading, measure_loading
 from ueperf.phases import NON_GAMEPLAY, WARMUP, assign_phases, last_marker_before
@@ -30,6 +31,7 @@ class Overrun:
     phase: str = ""
     after_marker: str = ""
     after_marker_s: float = 0.0
+    inputs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class Hitch:
     phase: str = ""
     after_marker: str = ""
     after_marker_s: float = 0.0
+    inputs: tuple[str, ...] = ()   # what the input driver was doing in the second before, and during
+    screenshot_s: float | None = None  # a launcher screenshot this many seconds from the hitch start
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,8 @@ class Analysis:
     markers: list[Marker] = field(default_factory=list)
     phases: list[PhaseSummary] = field(default_factory=list)
     frame_phases: list[str] = field(default_factory=list)
+    coverage: dict | None = None
+    agent_commands: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -247,14 +253,41 @@ def summarize_phases(frames: list[Frame], frame_phases: list[str], t: Thresholds
     return out
 
 
-def _with_context(item, index_of: dict[int, int], frame_phases: list[str], markers: list[Marker]):
-    """Attach the phase and the latest lifecycle marker before an overrun or hitch."""
+# Input is shown from this long before a hitch or overrun starts.
+INPUT_LEAD_MS = 1000.0
+# A hitch this close to a launcher screenshot says so, in case the capture cost the game a frame.
+SCREENSHOT_NEAR_MS = 250.0
+
+
+def _with_context(item, index_of: dict[int, int], frame_phases: list[str], markers: list[Marker],
+                  inputs: list[InputEvent]):
+    """Attach the phase, the latest lifecycle marker and the input driver's gestures around an overrun or hitch."""
     phase = frame_phases[index_of[item.start_frame]] if frame_phases else ""
+    played = tuple(describe(e) for e in active_between(inputs, item.start_ms - INPUT_LEAD_MS, item.end_ms))
     marker = last_marker_before(markers, item.start_frame)
     if marker is None:
-        return replace(item, phase=phase)
-    return replace(item, phase=phase, after_marker=marker.name,
+        return replace(item, phase=phase, inputs=played)
+    return replace(item, phase=phase, after_marker=marker.name, inputs=played,
                    after_marker_s=round((item.start_ms - marker.t_ms) / 1000.0, 3))
+
+
+def _near_screenshot(hitch: Hitch, screenshot_ms: list[float]) -> Hitch:
+    near = [t for t in screenshot_ms if abs(t - hitch.start_ms) <= SCREENSHOT_NEAR_MS]
+    if not near:
+        return hitch
+    t = min(near, key=lambda t: abs(t - hitch.start_ms))
+    return replace(hitch, screenshot_s=round((t - hitch.start_ms) / 1000.0, 3))
+
+
+def coverage_dict(coverage: Coverage) -> dict:
+    return {
+        "seed": coverage.seed,
+        "input_system": coverage.input_system,
+        "allowed": len(coverage.allowed),
+        "fired": len(coverage.fired),
+        "share": round(coverage.share, 4),
+        "actions": [asdict(a) for a in coverage.actions],
+    }
 
 
 def analyze(
@@ -263,6 +296,9 @@ def analyze(
     markers: list[Marker] | None = None,
     phase_map: dict[str, str] | None = None,
     run_info: dict[str, str] | None = None,
+    inputs: list[InputEvent] | None = None,
+    coverage: Coverage | None = None,
+    screenshot_ms: list[float] | None = None,
 ) -> Analysis:
     markers = sorted(markers or [], key=lambda m: (m.frame, m.t_ms))
     loading = measure_loading(frames, markers, t, run_info or {})
@@ -271,6 +307,7 @@ def analyze(
     playable_index = next((i for i, f in enumerate(frames) if f.frame == loading.playable_frame), len(frames))
     frame_phases = [WARMUP if i < playable_index and p not in NON_GAMEPLAY else p for i, p in enumerate(frame_phases)]
     index_of = {f.frame: i for i, f in enumerate(frames)}
+    inputs = sorted(inputs or [], key=lambda e: e.t_ms)
 
     # Hitches and overruns count only once the game is playable: before that the level
     # is still loading and streaming in, and slow frames there are loading, not hitches.
@@ -282,9 +319,13 @@ def analyze(
     return Analysis(
         loading=loading,
         summary=summarize(frames, t),
-        overruns=[_with_context(o, index_of, frame_phases, markers) for o in overruns],
-        hitches=[_with_context(h, index_of, frame_phases, markers) for h in hitches],
+        overruns=[_with_context(o, index_of, frame_phases, markers, inputs) for o in overruns],
+        hitches=[_near_screenshot(_with_context(h, index_of, frame_phases, markers, inputs), screenshot_ms or [])
+                 for h in hitches],
         markers=markers,
         phases=summarize_phases(frames, frame_phases, t) if frames else [],
         frame_phases=frame_phases,
+        coverage=coverage_dict(coverage) if coverage else None,
+        agent_commands=[{"t_ms": e.t_ms, "frame": e.frame, "command": f"{e.gesture} {e.value}".strip()}
+                        for e in inputs if e.action == AGENT],
     )

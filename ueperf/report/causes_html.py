@@ -28,6 +28,8 @@ td details > summary { font-size: 12px; margin: 4px 0 0; }
 .trigger { font-size: 13px; margin: 3px 0 0; }
 .trigger .how { display: inline-block; min-width: 92px; color: var(--text-secondary); font-size: 12px; }
 .trigger b { color: var(--series-2); }
+.inputs { font-size: 12px; margin: -4px 0 10px; color: var(--text-secondary); }
+.inputs .how { display: inline-block; min-width: 92px; }
 """
 
 
@@ -125,7 +127,7 @@ def _tree_table(tree: list[dict]) -> str:
             f'<th>Source</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div></details>')
 
 
-def explanation_html(title: str, meta: str, expl: dict | None) -> str:
+def explanation_html(title: str, meta: str, expl: dict | None, extra: str = "") -> str:
     if expl is None:
         body = '<p class="note">No trace was analyzed.</p>'
     else:
@@ -135,7 +137,7 @@ def explanation_html(title: str, meta: str, expl: dict | None) -> str:
                 f'{_e(w["thread"])} <code>{_e(w["timer"])}</code> +{w["rise_ms"]:.2f} ms' for w in expl["waits"]) + \
                 ". Worker scopes that rose are counted as the work it waited for.</p>"
         body = _hotspot_table(expl["hotspots"]) + waits + _tree_table(expl["tree"])
-    return f'<div class="expl"><h3>{_e(title)}</h3><p class="meta">{meta}</p>{body}</div>'
+    return f'<div class="expl"><h3>{_e(title)}</h3><p class="meta">{meta}</p>{extra}{body}</div>'
 
 
 def _context(item: dict) -> str:
@@ -146,6 +148,19 @@ def _context(item: dict) -> str:
     if item.get("after_marker"):
         parts.append(f'{item["after_marker_s"]:.2f} s after <code>{_e(item["after_marker"])}</code>')
     return (" · " + ", ".join(parts)) if parts else ""
+
+
+def inputs_html(item: dict) -> str:
+    """What the input driver was doing from a second before the hitch or overrun to its end."""
+    played = item.get("inputs") or []
+    shot = ""
+    if item.get("screenshot_s") is not None:
+        shot = (f'<p class="note">A launcher screenshot was taken {item["screenshot_s"]:+.2f} s from this hitch; '
+                'screenshots copy the window through the compositor and should not cost the game a frame.</p>')
+    if not played:
+        return shot
+    return ('<p class="inputs"><span class="how">player input</span> '
+            + " · ".join(f"<code>{_e(p)}</code>" for p in played) + "</p>" + shot)
 
 
 def hitches_html(analysis: dict, causes: dict | None) -> str:
@@ -162,7 +177,7 @@ def hitches_html(analysis: dict, causes: dict | None) -> str:
         expl = causes["hitches"][n - 1] if causes else None
         if expl and expl.get("trace_bound") and expl["trace_bound"] != h["bound"]:
             meta += f' · trace shows the extra work on <b>{_e(expl["trace_bound"])}</b>'
-        out.append(explanation_html(f"H{n}", meta, expl))
+        out.append(explanation_html(f"H{n}", meta, expl, inputs_html(h)))
     return "".join(out)
 
 
@@ -174,7 +189,7 @@ def overruns_html(analysis: dict, causes: dict | None) -> str:
         meta = (f'run {o["start_ms"] / 1000:.2f} to {o["end_ms"] / 1000:.2f} s · {o["frames_over"]} of {o["frames"]} frames '
                 f'over · excess {o["total_excess_ms"]:.1f} ms · peak {o["peak_ms"]:.1f} ms · {_e(o["bound"])}-bound · '
                 'times are per frame, averaged' + _context(o))
-        out.append(explanation_html(f"O{n}", meta, causes["overruns"][n - 1] if causes else None))
+        out.append(explanation_html(f"O{n}", meta, causes["overruns"][n - 1] if causes else None, inputs_html(o)))
     return "".join(out)
 
 

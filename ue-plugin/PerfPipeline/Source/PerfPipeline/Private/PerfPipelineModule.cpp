@@ -1,6 +1,7 @@
 #include "PerfPipelineModule.h"
 
 #include "PerfFrameRecorder.h"
+#include "PerfInputDriver.h"
 #include "PerfLifecycle.h"
 #include "Misc/App.h"
 #include "Misc/CommandLine.h"
@@ -21,8 +22,9 @@ void FPerfPipelineModule::StartupModule()
 	OutputFolder = FPaths::ConvertRelativePathToFull(OutputFolder);
 
 	FParse::Value(FCommandLine::Get(), TEXT("-PerfQuitAfter="), QuitAfterSeconds);
-	FString EventsFile, QuitOn;
+	FString EventsFile, QuitOn, PlayFile;
 	FParse::Value(FCommandLine::Get(), TEXT("-PerfEvents="), EventsFile);
+	FParse::Value(FCommandLine::Get(), TEXT("-PerfPlay="), PlayFile);
 	FParse::Value(FCommandLine::Get(), TEXT("-PerfQuitOn="), QuitOn);
 	StartSeconds = FPlatformTime::Seconds();
 	// How long the process ran before recording began: the head of the launch-to-playable time.
@@ -53,6 +55,11 @@ void FPerfPipelineModule::StartupModule()
 	FFileHelper::SaveStringToFile(Info, *FPaths::Combine(OutputFolder, TEXT("run_info.txt")));
 
 	Lifecycle = MakeUnique<FPerfLifecycle>(*Recorder, FPaths::ConvertRelativePathToFull(EventsFile), QuitOn);
+	if (!PlayFile.IsEmpty())
+	{
+		Driver = MakeUnique<FPerfInputDriver>(*Recorder, FPaths::ConvertRelativePathToFull(PlayFile), OutputFolder);
+		Lifecycle->OnMarker.AddRaw(Driver.Get(), &FPerfInputDriver::OnMarker);
+	}
 	UE_LOG(LogTemp, Log, TEXT("PerfPipeline: recording to %s"), *OutputFolder);
 
 	TickHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FPerfPipelineModule::Tick));
@@ -66,7 +73,8 @@ void FPerfPipelineModule::ShutdownModule()
 
 void FPerfPipelineModule::StopRecording()
 {
-	// The lifecycle fires run_end into the recorder, so it goes first.
+	// The driver and the lifecycle write through the recorder's clock, so they go first.
+	Driver.Reset();
 	Lifecycle.Reset();
 	Recorder.Reset();
 }
@@ -79,10 +87,14 @@ bool FPerfPipelineModule::Tick(float DeltaTime)
 	}
 	const bool bTimeUp = QuitAfterSeconds > 0.0 && FPlatformTime::Seconds() - StartSeconds >= QuitAfterSeconds;
 	const bool bMarker = Lifecycle.IsValid() && Lifecycle->QuitRequested();
-	if (bTimeUp || bMarker)
+	const bool bDriver = Driver.IsValid() && Driver->QuitRequested();
+	if (bTimeUp || bMarker || bDriver)
 	{
 		bQuitRequested = true;
-		UE_LOG(LogTemp, Log, TEXT("PerfPipeline: quitting (%s)"), bMarker ? TEXT("quit marker") : TEXT("time up"));
+		const TCHAR* Why = bDriver ? Driver->QuitReason() : (bMarker ? TEXT("quit marker") : TEXT("time up"));
+		UE_LOG(LogTemp, Log, TEXT("PerfPipeline: quitting (%s)"), Why);
+		// How the run ended, for the launcher and the report.
+		FFileHelper::SaveStringToFile(FString::Printf(TEXT("ended=%s\n"), Why), *FPaths::Combine(Recorder->OutputFolderPath(), TEXT("run_end.txt")));
 		StopRecording();
 		FPlatformMisc::RequestExit(false, TEXT("PerfPipeline"));
 	}

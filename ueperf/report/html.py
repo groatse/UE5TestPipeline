@@ -325,6 +325,46 @@ def _loading_html(analysis) -> str:
         + f'</div><p class="note">{note}</p>')
 
 
+def _coverage_html(analysis) -> str:
+    cov = analysis.get("coverage")
+    if not cov:
+        return ""
+    rows = []
+    for a in cov["actions"]:
+        if a["excluded"]:
+            state = '<span class="muted">excluded</span>'
+        elif a["fired"] == 0:
+            state = '<b style="color:var(--critical)">never fired</b>'
+        else:
+            state = f'{a["fired"]}'
+        rows.append(f'<tr><td><code>{_e(a["name"])}</code></td><td>{_e(a["value_type"])}</td><td>{_e(a["keys"])}</td>'
+                    f'<td>{_e(a["source"])}</td><td class="n">{state}</td><td class="n">{a["active_s"]:.1f}</td></tr>')
+    agent = analysis.get("agent_commands") or []
+    agent_html = ""
+    if agent:
+        agent_html = ('<p class="note">The supervising agent stepped in: ' + "; ".join(
+            f'{c["t_ms"] / 1000:.2f} s <code>{_e(c["command"])}</code>' for c in agent) + '.</p>')
+    return (f'<h2>Input coverage</h2><p class="sub">{cov["fired"]} of {cov["allowed"]} allowed actions fired, '
+            f'{_e(cov["input_system"])} input, seed {_e(cov["seed"])}. Actions are found at runtime from the player\'s '
+            'mapping contexts and input components.</p><div class="scroll"><table><thead><tr><th>Action</th><th>Type</th>'
+            '<th>Keys</th><th>Found in</th><th class="n">Fired</th><th class="n">Held s</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div>{agent_html}')
+
+
+def _run_meta_html(run: Path) -> str:
+    """How the run was launched and ended, and the machine it ran on."""
+    parts = []
+    meta_path, machine_path = run / "run.json", run / "machine.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        keep = {k: meta.get(k) for k in ("map", "play_s", "ended", "exit_code", "started", "wall_s", "build",
+                                          "build_time", "profile", "attention") if meta.get(k) not in (None, "", [])}
+        parts.append(json.dumps(keep, indent=2))
+    if machine_path.exists():
+        parts.append(json.dumps(json.loads(machine_path.read_text(encoding="utf-8")), indent=2))
+    return "".join(f"<pre>{_e(p)}</pre>" for p in parts)
+
+
 def _tiles(summary, n_hitches, n_overruns) -> str:
     tiles = [
         (f'{summary["median_ms"]:.2f} ms', "Median frame"),
@@ -379,11 +419,13 @@ def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str 
         '<h2>Frame time</h2>', _frame_chart(frames, analysis, causes, budget),
         '<h2>Thread and GPU time per frame</h2>', _thread_chart(frames, analysis, budget),
         _phases_table(analysis),
+        _coverage_html(analysis),
         '<h2>Hitches</h2>', trace_note, hitches_html(analysis, causes),
         '<h2>Sustained overruns</h2>', overruns_html(analysis, causes),
     ]
-    if run_info:
-        sections += ['<h2>Run info</h2>', f'<pre>{_e(run_info)}</pre>']
+    meta = _run_meta_html(run)
+    if run_info or meta:
+        sections += ['<h2>Run and machine</h2>', meta, f'<pre>{_e(run_info)}</pre>' if run_info else ""]
 
     body = "".join(sections)
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'

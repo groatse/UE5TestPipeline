@@ -16,6 +16,11 @@ public:
 	/** Record a lifecycle marker on the current frame; written to markers.csv. Game thread only. */
 	void AddMarker(const FString& Name, const FString& Detail);
 
+	/** Time and frame on the recorder's clock, for other logs that line up with frames.csv. */
+	double NowMs() const { return (FPlatformTime::Seconds() - StartSeconds) * 1000.0; }
+	uint64 FrameIndex() const { return GFrameCounter - FirstFrame; }
+	const FString& OutputFolderPath() const { return OutputFolder; }
+
 private:
 	struct FMarker
 	{
