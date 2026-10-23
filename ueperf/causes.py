@@ -33,7 +33,7 @@ from ueperf.ingest.trace import (
     path_times,
     window_for,
 )
-from ueperf.source_index import SourceIndex
+from ueperf.source_index import SourceIndex, _enclosing_function
 
 PathKey = tuple[str, Path]  # (thread group, call path)
 
@@ -70,6 +70,7 @@ class HotSpot:
     baseline_ms: float
     rise_ms: float
     scope: Scope
+    callers: list[str] = field(default_factory=list)  # path above it, framework scopes trimmed
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,9 @@ class Explanation:
     hotspots: list[HotSpot] = field(default_factory=list)
     waits: list[Wait] = field(default_factory=list)
     trace_bound: str = ""  # thread group whose own work rose most, from the trace
+    # Share of the stall the hot spots account for. The call tree is kept only when
+    # it is low, i.e. when the time is spread over many scopes.
+    hotspot_share: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -104,6 +108,7 @@ class Gain:
     credit_ms: float
     frames: int
     worst: list[TimeRange]
+    callers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -168,6 +173,7 @@ class ScopeResolver:
         self.roots = [str(r).replace("\\", "/").rstrip("/") + "/" for r in roots]
         self.assets = assets or {}
         self.cache: dict[tuple[str, Path], Scope] = {}
+        self.file_lines: dict[FsPath, list[str]] = {}
 
     def short(self, file: str) -> str:
         f = file.replace("\\", "/")
@@ -177,6 +183,18 @@ class ScopeResolver:
         # Insights records build-machine paths for engine code; keep from Engine/ on.
         i = f.find("/Engine/")
         return f[i + 1:] if i >= 0 else f
+
+    def function_at(self, file: str, line: int) -> str:
+        """Enclosing function of a source line, read from the local copy of the file."""
+        rel = self.short(file)
+        for root in self.roots:
+            local = FsPath(root) / rel
+            if local.exists():
+                if local not in self.file_lines:
+                    self.file_lines[local] = local.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = self.file_lines[local]
+                return _enclosing_function(lines, min(line, len(lines)) - 1) if lines else ""
+        return ""
 
     def asset(self, class_name: str) -> str:
         return self.assets.get(class_name, "")
@@ -192,7 +210,8 @@ class ScopeResolver:
         name = path[-1]
         if name in self.timer_sources:
             file, line = self.timer_sources[name]
-            return Scope("cpp", f"{self.short(file)}:{line}", 0)
+            func = self.function_at(file, line)
+            return Scope("cpp", f"{self.short(file)}:{line}" + (f" in {func}" if func else ""), 0)
         sites = self.index.sites(name) if self.index else []
         if sites:
             s = sites[0]
@@ -235,6 +254,11 @@ def is_ignored(timer: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(timer, p) for p in patterns)
 
 
+def trim_callers(path: Path, patterns: tuple[str, ...]) -> list[str]:
+    """The scopes above the last one, without the framework scopes every frame passes through."""
+    return [name for name in path[:-1] if not is_ignored(name, patterns)]
+
+
 def evenly(items: list[int], count: int) -> list[int]:
     """Up to `count` items spread evenly through `items`."""
     if len(items) <= count:
@@ -274,6 +298,7 @@ def explain(
     n_frames: int,
     resolver: ScopeResolver,
     t: Thresholds,
+    include_gpu: bool = True,
 ) -> Explanation:
     """Call tree, hot spots and waits for one frame, or `n_frames` frames summed in `paths`.
 
@@ -301,7 +326,8 @@ def explain(
         if group in CPU_GROUPS and is_ignored(path[-1], t.causes_ignore):
             waits[(group, path[-1])] += excl - base(k)[1]
     wait_rise = sum(v for v in waits.values() if v > 0)
-    search = list(SEARCHED_GROUPS) + (["workers"] if wait_rise >= t.causes_min_rise_ms else [])
+    search = [g for g in SEARCHED_GROUPS if include_gpu or g != "gpu"]
+    search += ["workers"] if wait_rise >= t.causes_min_rise_ms else []
 
     # Hot spots: paths whose own time rose.
     hot: list[HotSpot] = []
@@ -312,12 +338,13 @@ def explain(
         b_incl, b_excl = base(k)
         self_rise = excl - b_excl
         if self_rise >= t.causes_min_rise_ms:
-            hot.append(HotSpot(group, list(path), round(excl, 3), round(b_excl, 3), round(self_rise, 3), scope_of(k)))
+            hot.append(HotSpot(group, list(path), round(excl, 3), round(b_excl, 3), round(self_rise, 3), scope_of(k),
+                               trim_callers(path, t.causes_trim)))
     # Workers run in parallel: never let them claim more than the waits they caused.
     worker_rise = sum(h.rise_ms for h in hot if h.thread == "workers")
     if worker_rise > wait_rise > 0:
         f = wait_rise / worker_rise
-        hot = [HotSpot(h.thread, h.path, h.self_ms, h.baseline_ms, round(h.rise_ms * f, 3), h.scope)
+        hot = [HotSpot(h.thread, h.path, h.self_ms, h.baseline_ms, round(h.rise_ms * f, 3), h.scope, h.callers)
                if h.thread == "workers" else h for h in hot]
     hot.sort(key=lambda h: h.rise_ms, reverse=True)
 
@@ -382,6 +409,13 @@ def compute_report(
         lo, hi = index_of[start_frame], index_of[end_frame]
         return [i for i in range(lo, hi + 1) if i in per_frame and i not in baseline]
 
+    # GPU scopes are read over wall-clock windows, so a long CPU stall makes them look
+    # as if they rose. They are searched only when the frame log's GPU time itself rose.
+    gpu_base = statistics.median(frames[i].gpu_ms for i in baseline) if baseline else 0.0
+
+    def gpu_rose(idx: list[int]) -> bool:
+        return any(frames[i].gpu_ms - gpu_base >= 1.0 for i in idx)
+
     def explain_frames(idx: list[int], average: bool) -> Explanation:
         if not idx:
             return Explanation()
@@ -390,10 +424,23 @@ def compute_report(
         if average:
             summed = {k: [v[0] / n, v[1] / n] for k, v in summed.items()}
             n = 1
-        return explain(summed, medians, n, resolver, t)
+        return explain(summed, medians, n, resolver, t, include_gpu=gpu_rose(idx))
 
-    hitch_expl = [explain_frames(frames_in(h.start_frame, h.end_frame), average=False) for h in analysis.hitches]
-    overrun_expl = [explain_frames(frames_in(o.start_frame, o.end_frame), average=True) for o in analysis.overruns]
+    def keep_tree_if_spread(expl: Explanation, stall_ms: float) -> Explanation:
+        # When a few hot spots account for the stall, they are the answer and the
+        # framework scopes above them add nothing. The tree only helps when the time
+        # is spread thin over many scopes, so it is kept just for that case.
+        explained = sum(h.rise_ms for h in expl.hotspots)
+        expl.hotspot_share = round(min(1.0, explained / stall_ms), 3) if stall_ms > 0 else 0.0
+        if expl.hotspot_share >= t.causes_tree_below_share:
+            expl.tree = []
+        return expl
+
+    hitch_expl = [keep_tree_if_spread(explain_frames(frames_in(h.start_frame, h.end_frame), average=False), h.stall_ms)
+                  for h in analysis.hitches]
+    overrun_expl = [keep_tree_if_spread(explain_frames(frames_in(o.start_frame, o.end_frame), average=True),
+                                        o.total_excess_ms / max(o.frames_over, 1))
+                    for o in analysis.overruns]
     hitch_windows = [window_for(windows, index_of[h.start_frame]) for h in analysis.hitches]
 
     # Gains: hot-spot rise on each gameplay over-budget frame, scaled so a frame never
@@ -406,10 +453,11 @@ def compute_report(
 
     credit: dict[PathKey, float] = defaultdict(float)
     scopes: dict[PathKey, Scope] = {}
+    callers: dict[PathKey, list[str]] = {}
     hits: dict[PathKey, list[TimeRange]] = defaultdict(list)
     for i in read:
         excess = frame_cost(frames[i]) - t.budget_ms
-        expl = explain(per_frame[i], medians, 1, resolver, t)
+        expl = explain(per_frame[i], medians, 1, resolver, t, include_gpu=gpu_rose([i]))
         total = sum(h.rise_ms for h in expl.hotspots)
         f = min(1.0, excess / total) if total > 0 else 0.0
         interval = window_for(windows, i)
@@ -418,12 +466,13 @@ def compute_report(
             share = h.rise_ms * f
             credit[key] += share
             scopes[key] = h.scope
+            callers[key] = h.callers
             if interval:
                 hits[key].append(TimeRange(frames[i].frame, round(interval[0], 6), round(interval[1], 6), round(share, 3)))
 
     gains = [
         Gain(thread, list(path), scopes[(thread, path)], round(total * scale, 3), len(hits[(thread, path)]),
-             sorted(hits[(thread, path)], key=lambda r: r.credit_ms, reverse=True)[:3])
+             sorted(hits[(thread, path)], key=lambda r: r.credit_ms, reverse=True)[:3], callers[(thread, path)])
         for (thread, path), total in credit.items()
     ]
     gains.sort(key=lambda g: g.credit_ms, reverse=True)

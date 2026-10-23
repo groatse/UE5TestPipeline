@@ -22,6 +22,9 @@ STYLE = """
 .tree tr.wait td.name { color: var(--muted); }
 details > summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; margin: 8px 0 4px; }
 .waits { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+ol.callers { margin: 2px 0 4px; padding-left: 22px; font: 12px/1.5 ui-monospace, Consolas, monospace; color: var(--text-secondary); }
+ol.callers li.bp { color: var(--series-2); }
+td details > summary { font-size: 12px; margin: 4px 0 0; }
 """
 
 
@@ -50,16 +53,42 @@ def path_html(path: list[str]) -> str:
     return '<div class="path">' + " › ".join(parts) + "</div>"
 
 
+def source_first(scope: dict, name: str, thread: str) -> str:
+    """Where to look first: file:line and function in bold, then the scope name, kind and thread."""
+    src = scope.get("source") or ""
+    if scope["kind"] in ("cpp", "stat", "gpu") and src:
+        where, _, func = src.partition(" in ")
+        file_line = where.rsplit("/", 1)[-1]
+        head = f'<b>{_e(file_line)}</b>' + (f' <code>{_e(func)}</code>' if func else "")
+        sub = f'<span class="src">{_e(where)}</span>'
+    elif src:
+        head, sub = f'<b>{_e(src)}</b>', ""
+    else:
+        head, sub = '<b class="muted">no source location</b>', ""
+    more = f' <span class="muted">(+{scope["more_sites"]} more sites)</span>' if scope.get("more_sites") else ""
+    return (f'{head}{more}<br><span class="src">scope <code>{_e(name)}</code> {_kind(scope)} on {_e(thread)}</span>'
+            + (f'<br>{sub}' if sub else ""))
+
+
+def callers_html(callers: list[str]) -> str:
+    """The trimmed caller chain, top to bottom, behind a dropdown."""
+    if not callers:
+        return ""
+    items = "".join(
+        f'<li{" class=bp" if (c.startswith("ExecuteUbergraph_") or c.endswith("_C") or " /" in c) else ""}>{_e(c)}</li>'
+        for c in callers)
+    return f'<details><summary>called from ({len(callers)})</summary><ol class="callers">{items}</ol></details>'
+
+
 def _hotspot_table(hotspots: list[dict]) -> str:
     if not hotspots:
         return '<p class="note">No scope\'s own time rose above its baseline.</p>'
     rows = "".join(
-        f'<tr><td class="n">+{h["rise_ms"]:.2f}</td><td class="n">{h["self_ms"]:.2f}</td>'
-        f'<td class="n">{h["baseline_ms"]:.2f}</td><td>{_e(h["thread"])}</td>'
-        f'<td><code>{_e(h["path"][-1])}</code> {_kind(h["scope"])}<br>{_source(h["scope"])}{path_html(h["path"])}</td></tr>'
+        f'<tr><td class="n">+{h["rise_ms"]:.2f}</td><td class="n">{h["baseline_ms"]:.2f}</td>'
+        f'<td>{source_first(h["scope"], h["path"][-1], h["thread"])}{callers_html(h.get("callers", []))}</td></tr>'
         for h in hotspots)
-    return ('<div class="scroll"><table><thead><tr><th class="n">Rise ms</th><th class="n">Own ms</th>'
-            '<th class="n">Usual ms</th><th>Thread</th><th>Scope, source and call path</th></tr></thead>'
+    return ('<div class="scroll"><table><thead><tr><th class="n">Own rise ms</th><th class="n">Usual ms</th>'
+            '<th>Source, scope and callers</th></tr></thead>'
             f'<tbody>{rows}</tbody></table></div>')
 
 
@@ -75,7 +104,8 @@ def _tree_table(tree: list[dict]) -> str:
             f'<tr{wait}><td>{_e(n["thread"])}</td><td class="name" style="padding-left:{10 + pad}px">{_e(n["path"][-1])}</td>'
             f'<td class="n">{n["ms"]:.2f}</td><td class="n">+{n["rise_ms"]:.2f}</td><td class="n">{own}</td>'
             f'<td>{_kind(n["scope"])} {_source(n["scope"])}</td></tr>')
-    return ('<details><summary>Call tree of scopes whose time rose</summary><div class="scroll"><table class="tree"><thead><tr>'
+    return ('<details open><summary>No few scopes explain this one, so here is the call tree of everything whose '
+            'time rose</summary><div class="scroll"><table class="tree"><thead><tr>'
             '<th>Thread</th><th>Scope</th><th class="n">Incl ms</th><th class="n">Rise</th><th class="n">Own rise</th>'
             f'<th>Source</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div></details>')
 
@@ -138,12 +168,11 @@ def gains_html(causes: dict) -> str:
         return '<p class="note">No over-budget gameplay frames, so there is nothing to rank.</p>'
     rows = "".join(
         f'<tr><td class="n">{n}</td><td class="n">{g["credit_ms"]:.2f}</td><td class="n">{g["frames"]}</td>'
-        f'<td><code>{_e(g["path"][-1])}</code> {_kind(g["scope"])} <span class="muted">{_e(g["thread"])}</span><br>'
-        f'{_source(g["scope"])}{path_html(g["path"])}</td>'
+        f'<td>{source_first(g["scope"], g["path"][-1], g["thread"])}{callers_html(g.get("callers", []))}</td>'
         f'<td class="n">{", ".join("%.3f" % r["start_s"] for r in g["worst"])}</td></tr>'
         for n, g in enumerate(causes["gains"], 1))
     return ('<div class="scroll"><table><thead><tr><th class="n">#</th><th class="n">Over-budget ms</th>'
-            '<th class="n">Frames</th><th>Hot spot, source and call path</th><th class="n">Worst at, trace s</th>'
+            '<th class="n">Frames</th><th>Source, scope and callers</th><th class="n">Worst at, trace s</th>'
             f'</tr></thead><tbody>{rows}</tbody></table></div>')
 
 
@@ -152,6 +181,6 @@ def hitch_groups_html(causes: dict | None) -> str:
         return ""
     rows = "".join(
         f'<tr><td class="n">{g["hitches"]}</td><td class="n">{g["stall_ms"]:.1f}</td>'
-        f'<td>{_e(g["thread"])}</td><td>{path_html(g["path"])}</td></tr>' for g in causes["hitch_groups"])
+        f'<td>{_e(g["thread"])}</td><td>{path_html(g["path"][-3:])}</td></tr>' for g in causes["hitch_groups"])
     return ('<h2>Hitches by top hot spot</h2><div class="scroll"><table><thead><tr><th class="n">Hitches</th>'
             f'<th class="n">Stall ms</th><th>Thread</th><th>Call path</th></tr></thead><tbody>{rows}</tbody></table></div>')

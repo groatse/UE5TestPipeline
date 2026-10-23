@@ -25,6 +25,8 @@ class Thresholds:
     causes_skip_start_s: float = 2.0
     causes_min_rise_ms: float = 0.05
     causes_ignore: tuple[str, ...] = field(default_factory=tuple)
+    causes_trim: tuple[str, ...] = field(default_factory=tuple)
+    causes_tree_below_share: float = 0.5
 
 
 def load_thresholds(path: Path | None = None, budget_ms: float | None = None) -> Thresholds:
@@ -59,4 +61,6 @@ def load_thresholds(path: Path | None = None, budget_ms: float | None = None) ->
         causes_skip_start_s=float(causes.get("skip_start_s", defaults.causes_skip_start_s)),
         causes_min_rise_ms=float(causes.get("min_rise_ms", defaults.causes_min_rise_ms)),
         causes_ignore=tuple(causes.get("ignore", defaults.causes_ignore)),
+        causes_trim=tuple(causes.get("trim", defaults.causes_trim)),
+        causes_tree_below_share=float(causes.get("tree_below_share", defaults.causes_tree_below_share)),
     )

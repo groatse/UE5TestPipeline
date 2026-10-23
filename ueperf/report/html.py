@@ -327,12 +327,12 @@ def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str 
 
     trace_note = ""
     if causes:
-        trace_note = (f'<p class="note">Each hitch is read from the trace and compared with {causes["baseline_frames"]} '
-                      f'in-budget frames. <b>Rise</b> is time above a scope\'s usual cost on those frames; <b>own</b> is '
-                      f'time spent in the scope itself rather than in instrumented scopes below it, so a hot spot with a '
-                      f'large own rise and no deeper scopes is where to add instrumentation or start reading code. '
-                      f'Trace times are on the Insights clock, about {causes["trace_offset_s"]:.3f} s ahead of run time; '
-                      f'open the trace there to see the same scopes.</p>')
+        trace_note = (f'<p class="note">Each hitch lists the scopes whose <b>own</b> time rose above their usual cost '
+                      f'on {causes["baseline_frames"]} in-budget frames: the time spent in that scope itself, not in '
+                      'instrumented scopes below it. Each row leads with the source to open; the callers dropdown shows '
+                      'how it was reached, with framework scopes such as the engine loop left out. The full call tree '
+                      'appears only when no few scopes explain the stall. Trace times are on the Insights clock, about '
+                      f'{causes["trace_offset_s"]:.3f} s ahead of run time.</p>')
 
     sections = [
         f'<h1>{_e(name)}</h1>',

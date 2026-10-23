@@ -85,6 +85,15 @@ def test_explain_follows_blueprint_chain_to_hot_spot():
     assert kinds["OnTick"].kind == "blueprint" and "in W_HUD" in kinds["OnTick"].source
 
 
+def test_callers_drop_framework_scopes_and_keep_the_systems():
+    t = load_thresholds()
+    path = ("FEngineLoop::Tick", "Frame", "FrameTime", "Slate::Tick (Time and Widgets)", "Total Slate Tick Time",
+            "PreTickEvent", "Runner Flush", "Spawn Phase")
+    paths = {("game", path): [12.0, 12.0]}
+    expl = explain(paths, {}, 1, resolver(), t)
+    assert expl.hotspots[0].callers == ["PreTickEvent", "Runner Flush"]
+
+
 def test_game_thread_cause_found_when_render_thread_only_waited():
     # The frame log blamed the render thread, but it only waited; the work was on the game thread.
     t = load_thresholds()

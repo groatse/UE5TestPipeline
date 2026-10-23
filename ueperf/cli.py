@@ -56,20 +56,20 @@ def _scope_text(scope) -> str:
 def _print_explanation(expl, indent: str = "    ") -> None:
     if not expl.tree and not expl.hotspots:
         print(f"{indent}no scope rose above its baseline")
+    for h in expl.hotspots[:8]:
+        print(f"{indent}+{h.rise_ms:6.2f} ms  {h.scope.source or 'no source location'}")
+        print(f"{indent}           scope {h.path[-1]} [{KIND_LABEL.get(h.scope.kind, h.scope.kind)}] on {h.thread}")
+        if h.callers:
+            print(f"{indent}           called from: {' > '.join(h.callers)}")
+    for w in expl.waits:
+        print(f"{indent}waiting: {w.thread} {w.timer} +{w.rise_ms:.2f} ms")
     if expl.tree:
-        print(f"{indent}Call tree (inclusive ms, rise over baseline):")
+        print(f"{indent}Hot spots explain only {expl.hotspot_share:.0%} of the stall; call tree of what rose:")
         for node in expl.tree:
             pad = "  " * node.depth
             self_note = f", self +{node.self_rise_ms:.2f}" if node.self_rise_ms >= 0.25 else ""
             print(f"{indent}  {node.thread:<7} {pad}{node.path[-1]}  {node.ms:.2f} ms (+{node.rise_ms:.2f}{self_note})"
                   f"  {_scope_text(node.scope)}")
-    if expl.hotspots:
-        print(f"{indent}Where the time went (own time that rose):")
-        for h in expl.hotspots[:8]:
-            print(f"{indent}  +{h.rise_ms:6.2f} ms  {h.thread:<7} {h.path[-1]}  {_scope_text(h.scope)}")
-            print(f"{indent}             path: {' > '.join(h.path)}")
-    for w in expl.waits:
-        print(f"{indent}waiting: {w.thread} {w.timer} +{w.rise_ms:.2f} ms")
 
 
 def _print_causes(result: Analysis, report: CauseReport) -> None:
@@ -90,8 +90,10 @@ def _print_causes(result: Analysis, report: CauseReport) -> None:
     print("\nGains ranking (over-budget time each hot spot accounts for):")
     for n, g in enumerate(report.gains[:15], 1):
         where = ", ".join(f"{r.start_s:.3f} s" for r in g.worst)
-        print(f"  {n:>2}. {g.credit_ms:8.2f} ms  {g.thread:<7} {g.path[-1]}  {_scope_text(g.scope)}")
-        print(f"      {g.frames} frames, worst at {where}; path: {' > '.join(g.path)}")
+        print(f"  {n:>2}. {g.credit_ms:8.2f} ms  {g.scope.source or 'no source location'}")
+        print(f"      scope {g.path[-1]} on {g.thread}; {g.frames} frames, worst at {where}")
+        if g.callers:
+            print(f"      called from: {' > '.join(g.callers)}")
 
 
 def _print_phases(result: Analysis) -> None:

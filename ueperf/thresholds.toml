@@ -53,3 +53,42 @@ ignore = [
   "Oversubscription",
   "*LookingForWork*",
 ]
+# Framework scopes every frame passes through. They are dropped from the
+# caller chain shown under a hot spot, because they say nothing about why it
+# rose; the chain keeps only the scopes that place the hot spot in game or
+# engine systems.
+trim = [
+  "FEngineLoop::Tick",
+  "Frame",
+  "FrameTime",
+  "Tick_Engine",
+  "GameEngine Tick",
+  "UWorld_Tick",
+  "World Tick Time",
+  "GT Tickable Time",
+  "FTimerManager",
+  "Tick Time",
+  "TG_*",
+  "ReleaseTickGroup Block",
+  "TickCompletionEvents",
+  "ProcessUntilTasksComplete",
+  "FTickFunctionTask",
+  "Slate::Tick (Time and Widgets)",
+  "Total Slate Tick Time",
+  "Blueprint Time",
+  "BeginFrame",
+  "SceneRenderBuilder_*",
+  "SceneRender",
+  "RenderViewFamily",
+  "FDeferredShadingSceneRenderer_Render",
+  "Scene",
+  "RenderGraphExecute",
+  "ExecuteForegroundTask",
+  "ExecuteBackgroundTask",
+  "RHITaskPipe",
+  "RHI_Translate",
+]
+# The full call tree is shown only when the hot spots explain less than this
+# share of a hitch's stall, i.e. when the time is spread over many scopes and
+# no single one is the answer.
+tree_below_share = 0.5
