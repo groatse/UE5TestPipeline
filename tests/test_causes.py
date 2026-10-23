@@ -72,7 +72,7 @@ def test_explain_follows_blueprint_chain_to_hot_spot():
     medians = {("game", root): (2.0, 1.0), ("game", gm): (1.0, 1.0)}
     index = SourceIndex({"Widget::PlayAnimation": [Site("UserWidget.cpp", 844, "UUserWidget::PlayAnimation")]}, {})
     r = resolver(index, {"W_HUD": "Content/UI/W_HUD.uasset", "BP_GameMode": "Content/BP_GameMode.uasset"})
-    expl = explain(paths, medians, ["game"], 1, 11.1, r, t)
+    expl = explain(paths, medians, 1, r, t)
 
     top = expl.hotspots[0]
     assert top.path == list(leaf) and top.rise_ms == 18.0
@@ -85,6 +85,19 @@ def test_explain_follows_blueprint_chain_to_hot_spot():
     assert kinds["OnTick"].kind == "blueprint" and "in W_HUD" in kinds["OnTick"].source
 
 
+def test_game_thread_cause_found_when_render_thread_only_waited():
+    # The frame log blamed the render thread, but it only waited; the work was on the game thread.
+    t = load_thresholds()
+    spawn = ("FEngineLoop::Tick", "Runner Flush", "Spawn Phase")
+    stall = ("BeginFrame", "CPU Stall - Wait For Event")
+    paths = {("game", spawn): [12.7, 12.7], ("render", stall): [5.0, 5.0]}
+    medians = {("render", stall): (1.0, 1.0)}
+    expl = explain(paths, medians, 1, resolver(), t)
+    assert expl.trace_bound == "game"
+    assert expl.hotspots[0].path == list(spawn) and expl.hotspots[0].rise_ms == 12.7
+    assert expl.waits[0].thread == "render"
+
+
 def test_workers_count_only_when_bound_thread_waits_and_never_more_than_the_wait():
     t = load_thresholds()
     wait = ("Render", "WaitForTasks")
@@ -92,12 +105,12 @@ def test_workers_count_only_when_bound_thread_waits_and_never_more_than_the_wait
     medians = {("render", wait): (2.0, 2.0)}
 
     waiting = {("render", wait): [8.0, 8.0], ("workers", work): [20.0, 20.0]}
-    expl = explain(waiting, medians, ["render"], 1, 11.1, resolver(), t)
+    expl = explain(waiting, medians, 1, resolver(), t)
     assert [(h.thread, h.path[-1], h.rise_ms) for h in expl.hotspots] == [("workers", "Decode", 6.0)]
     assert expl.waits[0].timer == "WaitForTasks"
 
     not_waiting = {("render", wait): [2.0, 2.0], ("workers", work): [20.0, 20.0]}
-    assert explain(not_waiting, medians, ["render"], 1, 11.1, resolver(), t).hotspots == []
+    assert explain(not_waiting, medians, 1, resolver(), t).hotspots == []
 
 
 def test_gains_are_hot_spot_paths_capped_at_excess_and_skip_startup():

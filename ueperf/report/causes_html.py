@@ -114,7 +114,10 @@ def hitches_html(analysis: dict, causes: dict | None) -> str:
                 + (f'-{h["end_frame"]}' if h["end_frame"] != h["start_frame"] else "")
                 + f' · {h["peak_ms"]:.1f} ms vs usual {h["baseline_ms"]:.1f} ms · stall {h["stall_ms"]:.1f} ms · {_e(h["bound"])}-bound'
                 + _context(h))
-        out.append(explanation_html(f"H{n}", meta, causes["hitches"][n - 1] if causes else None))
+        expl = causes["hitches"][n - 1] if causes else None
+        if expl and expl.get("trace_bound") and expl["trace_bound"] != h["bound"]:
+            meta += f' · trace shows the extra work on <b>{_e(expl["trace_bound"])}</b>'
+        out.append(explanation_html(f"H{n}", meta, expl))
     return "".join(out)
 
 

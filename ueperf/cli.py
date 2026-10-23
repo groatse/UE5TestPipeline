@@ -79,7 +79,9 @@ def _print_causes(result: Analysis, report: CauseReport) -> None:
 
     for n, (h, expl, window) in enumerate(zip(result.hitches, report.hitches, report.hitch_windows), 1):
         at = f", trace {window[0]:.3f} to {window[1]:.3f} s" if window else ""
-        print(f"\nH{n}: frame {h.start_frame}, {h.peak_ms:.1f} ms vs {h.baseline_ms:.1f} ms, {h.bound}-bound{at}")
+        work = (f"; trace shows the extra work on {expl.trace_bound}"
+                if expl.trace_bound and expl.trace_bound != h.bound else "")
+        print(f"\nH{n}: frame {h.start_frame}, {h.peak_ms:.1f} ms vs {h.baseline_ms:.1f} ms, {h.bound}-bound{at}{work}")
         _print_explanation(expl)
     for n, (o, expl) in enumerate(zip(result.overruns, report.overruns), 1):
         print(f"\nO{n}: frames {o.start_frame}-{o.end_frame}, per frame on average")

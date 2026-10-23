@@ -21,7 +21,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path as FsPath
 
-from ueperf.analyze import MIXED, Analysis, bound_type, frame_cost
+from ueperf.analyze import Analysis, frame_cost
 from ueperf.config import Thresholds
 from ueperf.ingest.frames import Frame
 from ueperf.ingest.trace import (
@@ -85,6 +85,7 @@ class Explanation:
     tree: list[TreeNode] = field(default_factory=list)
     hotspots: list[HotSpot] = field(default_factory=list)
     waits: list[Wait] = field(default_factory=list)
+    trace_bound: str = ""  # thread group whose own work rose most, from the trace
 
 
 @dataclass(frozen=True)
@@ -234,15 +235,6 @@ def is_ignored(timer: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(timer, p) for p in patterns)
 
 
-def bound_groups(frame: Frame, t: Thresholds) -> list[str]:
-    """Thread groups to search: the bound one, or the top two when mixed."""
-    bound = bound_type(frame, t.mixed_within)
-    if bound != MIXED:
-        return [bound]
-    ranked = sorted(frame.threads().items(), key=lambda kv: kv[1], reverse=True)
-    return [ranked[0][0], ranked[1][0]]
-
-
 def evenly(items: list[int], count: int) -> list[int]:
     """Up to `count` items spread evenly through `items`."""
     if len(items) <= count:
@@ -272,16 +264,23 @@ def _sum_frames(frames_paths: list[dict[PathKey, list[float]]]) -> dict[PathKey,
     return total
 
 
+CPU_GROUPS = ("game", "render", "rhi")
+SEARCHED_GROUPS = CPU_GROUPS + ("gpu",)
+
+
 def explain(
     paths: dict[PathKey, list[float]],
     medians: dict[PathKey, tuple[float, float]],
-    groups: list[str],
     n_frames: int,
-    budget_ms: float,
     resolver: ScopeResolver,
     t: Thresholds,
 ) -> Explanation:
-    """Call tree, hot spots and waits for one frame, or `n_frames` frames summed in `paths`."""
+    """Call tree, hot spots and waits for one frame, or `n_frames` frames summed in `paths`.
+
+    Every thread group is searched, not only the one the frame log calls bound:
+    the frame log's thread times can land a frame late, so a game thread stall
+    may show up there as a render-bound frame whose render thread only waited.
+    """
     def base(k: PathKey) -> tuple[float, float]:
         b = medians.get(k, (0.0, 0.0))
         return b[0] * n_frames, b[1] * n_frames
@@ -295,14 +294,14 @@ def explain(
     def scope_of(k: PathKey) -> Scope:
         return resolver.resolve(k[0], k[1], graph_below.get(k))
 
-    # Waits on the bound threads decide whether workers are searched too.
+    # Waits on the CPU threads decide whether workers are searched too.
     waits: dict[tuple[str, str], float] = defaultdict(float)
     for k, (incl, excl) in paths.items():
         group, path = k
-        if group in groups and is_ignored(path[-1], t.causes_ignore):
+        if group in CPU_GROUPS and is_ignored(path[-1], t.causes_ignore):
             waits[(group, path[-1])] += excl - base(k)[1]
     wait_rise = sum(v for v in waits.values() if v > 0)
-    search = list(groups) + (["workers"] if wait_rise >= t.causes_min_rise_ms else [])
+    search = list(SEARCHED_GROUPS) + (["workers"] if wait_rise >= t.causes_min_rise_ms else [])
 
     # Hot spots: paths whose own time rose.
     hot: list[HotSpot] = []
@@ -314,7 +313,7 @@ def explain(
         self_rise = excl - b_excl
         if self_rise >= t.causes_min_rise_ms:
             hot.append(HotSpot(group, list(path), round(excl, 3), round(b_excl, 3), round(self_rise, 3), scope_of(k)))
-    # Workers run in parallel: never let them claim more than the wait they caused.
+    # Workers run in parallel: never let them claim more than the waits they caused.
     worker_rise = sum(h.rise_ms for h in hot if h.thread == "workers")
     if worker_rise > wait_rise > 0:
         f = wait_rise / worker_rise
@@ -322,7 +321,13 @@ def explain(
                if h.thread == "workers" else h for h in hot]
     hot.sort(key=lambda h: h.rise_ms, reverse=True)
 
-    # Call tree of paths whose inclusive time rose enough to matter.
+    # Where the extra work was: the group with the largest own-time rise of real work.
+    work = defaultdict(float)
+    for h in hot:
+        work[h.thread] += h.rise_ms
+    trace_bound = max(work, key=work.get) if work else ""
+
+    # Call tree of paths whose inclusive time rose enough to matter, busiest group first.
     total_rise = sum(h.rise_ms for h in hot)
     node_min = max(0.25 * n_frames, 0.03 * total_rise)
     rises: dict[PathKey, float] = {}
@@ -349,12 +354,12 @@ def explain(
                                  round(excl - b_excl, 3), scope))
             walk(group, k[1], depth + 1)
 
-    for group in search:
+    for group in sorted(search, key=lambda g: work.get(g, 0.0), reverse=True):
         walk(group, (), 0)
 
     wait_list = [Wait(g, name, round(r, 3)) for (g, name), r in waits.items() if r >= t.causes_min_rise_ms]
     wait_list.sort(key=lambda w: w.rise_ms, reverse=True)
-    return Explanation(tree=tree, hotspots=hot[:t.causes_top * 2], waits=wait_list[:3])
+    return Explanation(tree=tree, hotspots=hot[:t.causes_top * 2], waits=wait_list[:3], trace_bound=trace_bound)
 
 
 # ---------------------------------------------------------------- report
@@ -380,13 +385,12 @@ def compute_report(
     def explain_frames(idx: list[int], average: bool) -> Explanation:
         if not idx:
             return Explanation()
-        groups = sorted({g for i in idx for g in bound_groups(frames[i], t)})
         summed = _sum_frames([per_frame[i] for i in idx])
         n = len(idx)
         if average:
             summed = {k: [v[0] / n, v[1] / n] for k, v in summed.items()}
             n = 1
-        return explain(summed, medians, groups, n, t.budget_ms, resolver, t)
+        return explain(summed, medians, n, resolver, t)
 
     hitch_expl = [explain_frames(frames_in(h.start_frame, h.end_frame), average=False) for h in analysis.hitches]
     overrun_expl = [explain_frames(frames_in(o.start_frame, o.end_frame), average=True) for o in analysis.overruns]
@@ -405,7 +409,7 @@ def compute_report(
     hits: dict[PathKey, list[TimeRange]] = defaultdict(list)
     for i in read:
         excess = frame_cost(frames[i]) - t.budget_ms
-        expl = explain(per_frame[i], medians, bound_groups(frames[i], t), 1, t.budget_ms, resolver, t)
+        expl = explain(per_frame[i], medians, 1, resolver, t)
         total = sum(h.rise_ms for h in expl.hotspots)
         f = min(1.0, excess / total) if total > 0 else 0.0
         interval = window_for(windows, i)
