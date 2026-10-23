@@ -14,6 +14,7 @@ from ueperf.ingest.frames import load_frames
 from ueperf.ingest.markers import load_markers, markers_from_trace_times
 from ueperf.ingest.trace import align_frames, export_ticks_and_scopes
 from ueperf.insights import InsightsError, find_insights
+from ueperf.loading import read_run_info
 from ueperf.profile import DEFAULT_PHASES, load_profile
 from ueperf.report import write_report
 from ueperf.source_index import load_or_build
@@ -96,6 +97,24 @@ def _print_causes(result: Analysis, report: CauseReport) -> None:
             print(f"      called from: {' > '.join(g.callers)}")
 
 
+def _print_loading(result: Analysis) -> None:
+    ld = result.loading
+    if ld is None:
+        return
+
+    def s(v):
+        return f"{v:.2f} s" if v is not None else "n/a"
+
+    print(f"\nLoading (playable = first {ld.window_s:g} s window with at most {ld.max_share_over:.0%} of frames "
+          f"over budget and none over {ld.max_frame_ratio:g}x budget):")
+    print(f"  launch to playable      {s(ld.launch_to_playable_s)}")
+    print(f"  launch to recording     {s(ld.launch_to_recording_s)}")
+    print(f"  map load                {s(ld.map_load_s)}")
+    print(f"  map loaded to playable  {s(ld.map_loaded_to_playable_s)}")
+    if ld.playable_frame is None:
+        print("  the frame rate never became steady in this run")
+
+
 def _print_phases(result: Analysis) -> None:
     if not result.markers:
         return
@@ -143,9 +162,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             print(f"\nReading the trace failed: {e}", file=sys.stderr)
             return 1
 
-    result = analyze(frames, thresholds, markers, phase_map)
+    result = analyze(frames, thresholds, markers, phase_map, read_run_info(run / "run_info.txt"))
     output = result.to_dict()
     _print_analysis(result)
+    _print_loading(result)
     _print_phases(result)
 
     if args.no_trace:

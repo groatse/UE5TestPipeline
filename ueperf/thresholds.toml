@@ -3,6 +3,15 @@
 # Frame budget in ms. A profile's budget_ms or --budget-ms overrides it.
 budget_ms = 11.1
 
+[playable]
+# The game counts as playable from the first frame that starts a window this
+# long with no more than this share of frames over budget and no frame over
+# max_frame_ratio times the budget. Frames before it (after the map loads) are
+# "warmup": shown, but kept out of baselines and gains.
+window_s = 2.0
+max_share_over = 0.01
+max_frame_ratio = 1.5
+
 [bound]
 # An over-budget frame is "mixed" when the second-largest of game, render,
 # RHI and GPU time is within this fraction of the largest.

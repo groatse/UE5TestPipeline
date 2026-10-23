@@ -9,7 +9,7 @@ from pathlib import Path
 from ueperf.ingest.frames import Frame, load_frames
 from ueperf.phases import NON_GAMEPLAY
 from ueperf.report.causes_html import STYLE as CAUSE_STYLE
-from ueperf.report.causes_html import gains_html, hitch_groups_html, hitches_html, overruns_html
+from ueperf.report.causes_html import gains_html, hitches_html, overruns_html
 
 CHART_W = 1100
 CHART_H = 260
@@ -187,7 +187,10 @@ def _frame_chart(frames, analysis, causes, budget) -> str:
             xb = s.x(phases[k + 1]["start_ms"] / 1000.0) if k + 1 < len(phases) else s.x1
             if p["phase"] in NON_GAMEPLAY:
                 parts.append(f'<rect x="{xa:.1f}" y="{s.y1}" width="{max(xb - xa, 1):.1f}" height="{s.y0 - s.y1}" fill="var(--band)"/>')
-            parts.append(f'<text x="{xa + 4:.1f}" y="{s.y1 + 12}" font-size="11" fill="var(--text-secondary)">{_e(p["phase"])}</text>')
+            if xb - xa >= 60:  # narrow bands keep their hover title only
+                parts.append(f'<text x="{xa + 4:.1f}" y="{s.y1 + 12}" font-size="11" fill="var(--text-secondary)">{_e(p["phase"])}</text>')
+            parts.append(f'<rect x="{xa:.1f}" y="{s.y1}" width="{max(xb - xa, 1):.1f}" height="8" fill="transparent">'
+                         f'<title>{_e(p["phase"])} from {p["start_ms"] / 1000:.2f} s</title></rect>')
         gameplay_from = next((p["start_ms"] / 1000.0 for p in phases if p["phase"] not in NON_GAMEPLAY), t1)
         startup_end = gameplay_from
     else:
@@ -221,6 +224,12 @@ def _frame_chart(frames, analysis, causes, budget) -> str:
         if row is not None:  # no free row: the hover title still names it
             last_x[row] = x
             parts.append(f'<text x="{x + 3:.1f}" y="{s.y0 - 6 - row * 13}" font-size="10" fill="var(--muted)">{_e(m["name"])}</text>')
+    ld = analysis.get("loading") or {}
+    if ld.get("playable_run_s") is not None:
+        x = s.x(ld["playable_run_s"])
+        parts.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{s.y1}" y2="{s.y0}" stroke="var(--series-3)" stroke-width="1.5"/>')
+        parts.append(f'<text x="{x + 4:.1f}" y="{s.y1 + 26}" font-size="11" font-weight="600" fill="var(--text-primary)">'
+                     f'playable</text>')
     parts.append(_polyline(frames, s, lambda f: f.frame_ms, "var(--series-1)"))
 
     for n, h in enumerate(analysis["hitches"], 1):
@@ -244,7 +253,8 @@ def _frame_chart(frames, analysis, causes, budget) -> str:
               '<span><i style="background:none;border-top:1px dashed var(--text-secondary)"></i>Budget</span>'
               '<span><i class="dot" style="background:var(--critical)"></i>Hitch</span>'
               '<span><i class="box" style="background:var(--overrun)"></i>Sustained overrun</span>'
-              '<span><i class="box" style="background:var(--band)"></i>Startup or loading</span>'
+              '<span><i class="box" style="background:var(--band)"></i>Startup, loading or warmup</span>'
+              '<span><i style="background:var(--series-3)"></i>Playable</span>'
               '<span><i style="background:none;border-top:1px dotted var(--muted)"></i>Lifecycle marker</span></div>')
     note = f'<p class="note">Frames above {y_max:.0f} ms are drawn at the top edge; their value is printed beside them.</p>'
     return (f'<div class="card" data-chart="frames">{legend}{"".join(parts)}<div class="tip"></div>'
@@ -287,6 +297,31 @@ def _phases_table(analysis) -> str:
             '<details><summary>Lifecycle markers</summary><div class="scroll"><table><thead><tr><th class="n">Run s</th>'
             '<th class="n">Frame</th><th>Marker</th><th>Detail</th><th>Found by</th></tr></thead>'
             f'<tbody>{marker_rows}</tbody></table></div></details>')
+
+
+def _loading_html(analysis) -> str:
+    ld = analysis.get("loading")
+    if not ld:
+        return ""
+
+    def s(v):
+        return f"{v:.2f} s" if v is not None else "n/a"
+
+    tiles = [
+        (s(ld["launch_to_playable_s"]), "Launch to playable"),
+        (s(ld["launch_to_recording_s"]), "Launch to engine up"),
+        (s(ld["map_load_s"]), "Map load"),
+        (s(ld["map_loaded_to_playable_s"]), "Map loaded to playable"),
+    ]
+    note = (f'Playable is the first frame that starts a {ld["window_s"]:g} s stretch with at most '
+            f'{ld["max_share_over"]:.0%} of frames over budget and none over {ld.get("max_frame_ratio", 1.5):g}× the '
+            'budget. Frames from the map load until then are the '
+            '<b>warmup</b> phase: shown in the chart and hitch list, but left out of baselines and the gains ranking.')
+    if ld["playable_frame"] is None:
+        note = 'The frame rate never became steady in this run, so there is no playable time. ' + note
+    return ('<h2>Loading</h2><div class="tiles">' + "".join(
+        f'<div class="tile"><div class="v">{_e(v)}</div><div class="k">{_e(k)}</div></div>' for v, k in tiles)
+        + f'</div><p class="note">{note}</p>')
 
 
 def _tiles(summary, n_hitches, n_overruns) -> str:
@@ -338,10 +373,11 @@ def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str 
         f'<h1>{_e(name)}</h1>',
         f'<p class="sub">{summary["frames"]} frames over {summary["duration_s"]:.1f} s, budget {budget:g} ms</p>',
         _tiles(summary, len(analysis["hitches"]), len(analysis["overruns"])),
+        _loading_html(analysis),
         '<h2>Frame time</h2>', _frame_chart(frames, analysis, causes, budget),
         '<h2>Thread and GPU time per frame</h2>', _thread_chart(frames, analysis, budget),
         _phases_table(analysis),
-        '<h2>Hitches</h2>', trace_note, hitches_html(analysis, causes), hitch_groups_html(causes),
+        '<h2>Hitches</h2>', trace_note, hitches_html(analysis, causes),
         '<h2>Sustained overruns</h2>', overruns_html(analysis, causes),
     ]
     if causes:

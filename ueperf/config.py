@@ -11,6 +11,9 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Thresholds:
     budget_ms: float = 11.1
+    playable_window_s: float = 2.0
+    playable_max_share_over: float = 0.01
+    playable_max_frame_ratio: float = 1.5
     mixed_within: float = 0.10
     overrun_min_frames: int = 45
     overrun_max_gap_frames: int = 5
@@ -44,9 +47,13 @@ def load_thresholds(path: Path | None = None, budget_ms: float | None = None) ->
     overrun = raw.get("overrun", {})
     hitch = raw.get("hitch", {})
     causes = raw.get("causes", {})
+    playable = raw.get("playable", {})
     defaults = Thresholds()
     return Thresholds(
         budget_ms=float(budget_ms if budget_ms is not None else raw.get("budget_ms", defaults.budget_ms)),
+        playable_window_s=float(playable.get("window_s", defaults.playable_window_s)),
+        playable_max_share_over=float(playable.get("max_share_over", defaults.playable_max_share_over)),
+        playable_max_frame_ratio=float(playable.get("max_frame_ratio", defaults.playable_max_frame_ratio)),
         mixed_within=float(bound.get("mixed_within", defaults.mixed_within)),
         overrun_min_frames=int(overrun.get("min_frames", defaults.overrun_min_frames)),
         overrun_max_gap_frames=int(overrun.get("max_gap_frames", defaults.overrun_max_gap_frames)),

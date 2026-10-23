@@ -176,11 +176,3 @@ def gains_html(causes: dict) -> str:
             f'</tr></thead><tbody>{rows}</tbody></table></div>')
 
 
-def hitch_groups_html(causes: dict | None) -> str:
-    if not causes or not causes["hitch_groups"]:
-        return ""
-    rows = "".join(
-        f'<tr><td class="n">{g["hitches"]}</td><td class="n">{g["stall_ms"]:.1f}</td>'
-        f'<td>{_e(g["thread"])}</td><td>{path_html(g["path"][-3:])}</td></tr>' for g in causes["hitch_groups"])
-    return ('<h2>Hitches by top hot spot</h2><div class="scroll"><table><thead><tr><th class="n">Hitches</th>'
-            f'<th class="n">Stall ms</th><th>Thread</th><th>Call path</th></tr></thead><tbody>{rows}</tbody></table></div>')

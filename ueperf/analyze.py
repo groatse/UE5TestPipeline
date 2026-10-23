@@ -9,7 +9,8 @@ from dataclasses import asdict, dataclass, field, replace
 from ueperf.config import Thresholds
 from ueperf.ingest.frames import Frame
 from ueperf.ingest.markers import Marker
-from ueperf.phases import NON_GAMEPLAY, assign_phases, last_marker_before
+from ueperf.loading import Loading, measure_loading
+from ueperf.phases import NON_GAMEPLAY, WARMUP, assign_phases, last_marker_before
 
 MIXED = "mixed"
 
@@ -77,6 +78,7 @@ class Summary:
 @dataclass
 class Analysis:
     summary: Summary
+    loading: Loading | None = None
     overruns: list[Overrun] = field(default_factory=list)
     hitches: list[Hitch] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
@@ -260,15 +262,21 @@ def analyze(
     t: Thresholds,
     markers: list[Marker] | None = None,
     phase_map: dict[str, str] | None = None,
+    run_info: dict[str, str] | None = None,
 ) -> Analysis:
     markers = sorted(markers or [], key=lambda m: (m.frame, m.t_ms))
-    frame_phases = assign_phases(frames, markers, phase_map or {}) if markers else []
+    loading = measure_loading(frames, markers, t, run_info or {})
+    frame_phases = assign_phases(frames, markers, phase_map or {}) if markers else ["gameplay"] * len(frames)
+    # Until the frame rate is steady the game isn't playable yet: those frames are warmup.
+    playable_index = next((i for i, f in enumerate(frames) if f.frame == loading.playable_frame), len(frames))
+    frame_phases = [WARMUP if i < playable_index and p not in NON_GAMEPLAY else p for i, p in enumerate(frame_phases)]
     index_of = {f.frame: i for i, f in enumerate(frames)}
     return Analysis(
+        loading=loading,
         summary=summarize(frames, t),
         overruns=[_with_context(o, index_of, frame_phases, markers) for o in find_overruns(frames, t)],
         hitches=[_with_context(h, index_of, frame_phases, markers) for h in find_hitches(frames, t)],
         markers=markers,
-        phases=summarize_phases(frames, frame_phases, t) if frame_phases else [],
+        phases=summarize_phases(frames, frame_phases, t) if frames else [],
         frame_phases=frame_phases,
     )

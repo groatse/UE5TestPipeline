@@ -6,8 +6,10 @@ from ueperf.ingest.frames import Frame
 from ueperf.ingest.markers import Marker
 
 STARTUP = "startup"
+# After loading, until the frame rate is steady (see ueperf.loading).
+WARMUP = "warmup"
 # Phases whose frames are not gameplay: kept out of baselines and the gains ranking.
-NON_GAMEPLAY = {STARTUP, "loading"}
+NON_GAMEPLAY = {STARTUP, "loading", WARMUP}
 
 
 def assign_phases(frames: list[Frame], markers: list[Marker], phase_map: dict[str, str]) -> list[str]:

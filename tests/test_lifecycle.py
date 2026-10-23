@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from ueperf.analyze import analyze
 from ueperf.config import Thresholds
 from ueperf.ingest.frames import Frame
@@ -51,12 +53,27 @@ def test_trace_scope_becomes_marker_on_its_tick():
 
 
 def test_hitch_gets_phase_and_time_since_last_marker():
-    ms = [7.0] * 200
-    ms[150] = 30.0
+    ms = [7.0] * 600
+    ms[400] = 30.0
     frames = [Frame(i, i * 10.0, m, m - 1, 1, 1, 1) for i, m in enumerate(ms)]
-    markers = [Marker(0, 0.0, "map_load_end"), Marker(120, 1200.0, "match_start")]
+    markers = [Marker(0, 0.0, "map_load_end"), Marker(380, 3800.0, "match_start")]
     result = analyze(frames, Thresholds(), markers, {"map_load_end": "in_map", "match_start": "match"})
     h = result.hitches[0]
-    assert (h.phase, h.after_marker, h.after_marker_s) == ("match", "match_start", 0.3)
+    assert (h.phase, h.after_marker, h.after_marker_s) == ("match", "match_start", 0.2)
     assert [p.phase for p in result.phases] == ["in_map", "match"]
-    assert result.phases[1].frames == 80
+    assert result.phases[1].frames == 220
+
+
+def test_playable_after_load_spikes_and_warmup_before_it():
+    ms = [7.0] * 600
+    ms[20] = 60.0   # level-load aftermath
+    ms[60] = 25.0
+    frames = [Frame(i, i * 10.0, m, m - 1, 1, 1, 1) for i, m in enumerate(ms)]
+    markers = [Marker(0, 0.0, "map_load_start"), Marker(0, 300.0, "map_load_end")]
+    result = analyze(frames, Thresholds(), markers, {"map_load_start": "loading", "map_load_end": "in_map"},
+                     {"launch_to_recording_s": "3.0"})
+    ld = result.loading
+    assert ld.playable_frame == 61                  # first frame after the last spike
+    assert ld.launch_to_playable_s == pytest.approx(3.0 + 0.61)
+    assert ld.map_loaded_to_playable_s == pytest.approx(0.61 - 0.3)
+    assert result.frame_phases[:61] == ["warmup"] * 61 and result.frame_phases[61] == "in_map"

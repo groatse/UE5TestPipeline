@@ -111,12 +111,6 @@ class Gain:
     callers: list[str] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class HitchGroup:
-    thread: str
-    path: list[str]
-    hitches: int
-    stall_ms: float
 
 
 @dataclass
@@ -131,7 +125,6 @@ class CauseReport:
     hitches: list[Explanation] = field(default_factory=list)
     overruns: list[Explanation] = field(default_factory=list)
     gains: list[Gain] = field(default_factory=list)
-    hitch_groups: list[HitchGroup] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -477,15 +470,6 @@ def compute_report(
     ]
     gains.sort(key=lambda g: g.credit_ms, reverse=True)
 
-    groups: dict[tuple[str, Path], list[float]] = defaultdict(lambda: [0, 0.0])
-    for h, expl in zip(analysis.hitches, hitch_expl):
-        top = expl.hotspots[0] if expl.hotspots else None
-        key = (top.thread, tuple(top.path)) if top else ("unknown", ("unknown",))
-        groups[key][0] += 1
-        groups[key][1] += h.stall_ms
-    hitch_groups = [HitchGroup(thread, list(path), int(n), round(stall, 3)) for (thread, path), (n, stall) in groups.items()]
-    hitch_groups.sort(key=lambda g: g.stall_ms, reverse=True)
-
     aligned = [(w.start_s - f.t_ms / 1000.0) for f, w in zip(frames, windows) if w is not None]
     return CauseReport(
         trace_offset_s=round(statistics.median(aligned), 6) if aligned else 0.0,
@@ -498,7 +482,6 @@ def compute_report(
         hitches=hitch_expl,
         overruns=overrun_expl,
         gains=gains[:25],
-        hitch_groups=hitch_groups,
     )
 
 

@@ -149,6 +149,9 @@ ueperf analyze runs\m5a --profile profiles\LoadedDiceFaceOff.toml
 
 The plugin turns on verbose named events, so the trace names more per-object work (component registration, widget animation instances).
 
+### Loading time
+
+The game counts as **playable** from the first frame that starts a 2 s stretch with at most 1% of frames over budget and none over 1.5x the budget (`[playable]` in `thresholds.toml`). The report gives launch to playable (the plugin records how long the process ran before recording began), map load (`map_load_start` to `map_load_end`) and map loaded to playable. Frames between the map load and playable are the `warmup` phase: they show in the chart and the hitch list, but are left out of baselines and the gains ranking, so level-load leftovers such as texture creation, PSO compiles and the RHI delete queue don't crowd out what can be tuned in gameplay.
 ### Report
 
 `analyze` also writes `report.html` to the run folder; `ueperf report <run>` rewrites it from an existing `analysis.json`. It is one self-contained file that opens offline and follows the system light or dark theme:

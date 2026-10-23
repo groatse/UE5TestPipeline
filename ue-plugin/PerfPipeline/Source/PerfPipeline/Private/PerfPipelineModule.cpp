@@ -25,6 +25,8 @@ void FPerfPipelineModule::StartupModule()
 	FParse::Value(FCommandLine::Get(), TEXT("-PerfEvents="), EventsFile);
 	FParse::Value(FCommandLine::Get(), TEXT("-PerfQuitOn="), QuitOn);
 	StartSeconds = FPlatformTime::Seconds();
+	// How long the process ran before recording began: the head of the launch-to-playable time.
+	const double LaunchToRecordingSeconds = StartSeconds - GStartTime;
 
 	Recorder = MakeUnique<FPerfFrameRecorder>(OutputFolder);
 
@@ -40,8 +42,9 @@ void FPerfPipelineModule::StartupModule()
 
 	// What this build can record, so the pipeline can check a capture is usable.
 	const FString Info = FString::Printf(
-		TEXT("build_config=%s\nue_trace_enabled=%d\ntracing=%d\ncsv_profiler=%d\nstats=%d\ncommand_line=%s\n"),
+		TEXT("build_config=%s\nlaunch_to_recording_s=%.3f\nue_trace_enabled=%d\ntracing=%d\ncsv_profiler=%d\nstats=%d\ncommand_line=%s\n"),
 		LexToString(FApp::GetBuildConfiguration()),
+		LaunchToRecordingSeconds,
 		UE_TRACE_ENABLED,
 		bTracing,
 		CSV_PROFILER,
