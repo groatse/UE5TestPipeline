@@ -1,18 +1,18 @@
 # UE5TestPipeline
 
-Automated performance playtests for UE5 projects. The pipeline plays a packaged build by firing the player's own input actions, records frame timing and an Unreal Insights trace, and reports what caused each hitch and budget overrun and where the biggest gains are.
+Automated performance playtests for UE5 projects. The pipeline plays a packaged build by firing the player's own input actions, records frame timing and an Unreal Insights trace, and reports exactly what caused each hitch and budget overrun: the source, the call path and the game class or Blueprint behind it.
 
 The first project under test is LoadedDiceFaceOff (UE 5.7).
 
 ## Status
 
-Milestones 1 to 5 are done: the plugin records per-frame timing and lifecycle markers in a packaged Development build alongside a full Insights trace, and `ueperf analyze` finds sustained overruns and hitches, explains each as call paths from the trace, places it in its lifecycle phase, and ranks the gains.
+Milestones 1 to 5 are done: the plugin records per-frame timing and lifecycle markers in a packaged Development build alongside a full Insights trace, and `ueperf analyze` finds sustained overruns and hitches, explains each from the trace down to the source and the Blueprint or object behind it, places it in its lifecycle phase, and measures loading time.
 
 | Milestone | State |
 | --- | --- |
 | 1. Capture spike | Done |
 | 2. Frame analysis | Done |
-| 3. Cause finding and gains ranking | Done |
+| 3. Cause finding | Done |
 | 4. Single-run report | Done |
 | 5. Lifecycle markers and capture control | Done |
 | 6. Input driver | Not started |
@@ -89,7 +89,7 @@ Markers are predictable lifecycle events, never gameplay segments. They label ph
   - `spawn = "BP_DiceActor_C"`: an actor of that class, or with it in its class chain, is spawned.
   - `log = "GAME SUMMARY"`: a log line contains the text.
   - `scope = "Client_OnGameStarted"`: a trace scope, such as a UFunction or RPC. These are found by the analyzer in the trace after the run, for moments the game exposes to nothing reflected.
-- **Phases:** the profile's `[phases]` maps markers to the phase they start. Frames before the first one are `startup`. Startup and loading frames stay out of baselines and the gains ranking.
+- **Phases:** the profile's `[phases]` maps markers to the phase they start. Frames before the first one are `startup`. No hitches or overruns are recorded during startup, loading or warmup, and those frames stay out of baselines.
 
 For LoadedDiceFaceOff (`profiles/LoadedDiceFaceOff.toml`): `countdown_start` is the dice spawn in `AGameModeLoadedDice::StartGame`, `match_start` is the `Client_OnGameStarted` RPC from `LaunchMatch`, and `match_end` polls the game mode's `IsMatchEnded`.
 
@@ -145,23 +145,25 @@ ueperf analyze runs\m5a --profile profiles\LoadedDiceFaceOff.toml
 4. **Hot spots:** paths whose own time rose are where the extra time was actually spent. A hot spot with a large own rise and nothing instrumented below it is the place to add a scope or start reading code. When the bound thread's rise is waiting (`WaitForTasks` and similar), worker paths that rose are hot spots too, scaled so they never claim more than the wait.
 5. **What is shown:** each hot spot leads with its source (file:line and function), then the scope, and a "called from" dropdown with the caller chain. Framework scopes every frame passes through (engine loop, world tick, Slate tick, scene render, task dispatch; `trim` in `thresholds.toml`) are left out of that chain. Every thread is searched; the GPU only when the frame log's GPU time rose, because GPU scopes read over a long CPU frame always look larger. The full call tree is shown only when the hot spots explain less than half of the stall, which is when time is spread over many small scopes.
 6. **What each scope is:** names resolve through Insights' own timer sources, a source index of engine and project code (cycle stats, quick scopes, CPU profiler scopes, named events, RDG passes, with the enclosing function), and the project's `Content` assets. Scopes are labelled C++, Blueprint function or event (with the owning Blueprint and asset path), object (Blueprint class or widget animation), UObject, GPU pass or wait. The engine index takes about 45 s on first use and is cached in `%LOCALAPPDATA%\ueperf`; `--reindex` rebuilds it.
-7. **Gains:** hot-spot rises on each gameplay over-budget frame, scaled so a frame never gives out more than its excess, are summed per call path and ranked. Startup and loading frames, by lifecycle phase, are left out; runs without markers fall back to skipping the first 2 seconds.
+7. **Who is behind it:** when the hot spot is an engine system, the report names the game class, Blueprint or object behind it. **Called by** is the nearest Blueprint or object above it in its own call path. **Working on** is the object an engine system was processing, found under the same system scope in that frame (such as a widget animation instance). **Requested by** is the Blueprint that queued the work earlier in the frame, for systems listed in `[causes.requesters]` in `thresholds.toml` (MovieScene's `Runner Flush` is queued by `Widget::PlayAnimation`, for example).
 
 The plugin turns on verbose named events, so the trace names more per-object work (component registration, widget animation instances).
 
 ### Loading time
 
-The game counts as **playable** from the first frame that starts a 2 s stretch with at most 1% of frames over budget and none over 1.5x the budget (`[playable]` in `thresholds.toml`). The report gives launch to playable (the plugin records how long the process ran before recording began), map load (`map_load_start` to `map_load_end`) and map loaded to playable. Frames between the map load and playable are the `warmup` phase: they show in the chart and the hitch list, but are left out of baselines and the gains ranking, so level-load leftovers such as texture creation, PSO compiles and the RHI delete queue don't crowd out what can be tuned in gameplay.
+The game counts as **playable** from the first frame that starts a 2 s stretch with at most 1% of frames over budget and none over 1.5x the budget (`[playable]` in `thresholds.toml`). The report gives launch to playable (the plugin records how long the process ran before recording began), map load (`map_load_start` to `map_load_end`) and map loaded to playable. Frames between the map load and playable are the `warmup` phase: they show in the chart, but no hitches or overruns are recorded there and they stay out of baselines, so level-load leftovers such as texture creation, PSO compiles and the RHI delete queue aren't reported as gameplay hitches.
+
 ### Report
 
 `analyze` also writes `report.html` to the run folder; `ueperf report <run>` rewrites it from an existing `analysis.json`. It is one self-contained file that opens offline and follows the system light or dark theme:
 
 - summary tiles (median, p95, p99, worst frame, share over budget, hitch and overrun counts)
-- frame time against the budget line, with hitches, sustained overruns and the startup window marked
+- loading: launch to playable, launch to engine up, map load, and map loaded to playable
+- frame time against the budget line, with hitches, sustained overruns, phases, markers and the playable point marked
 - game, render, RHI and GPU time per frame
 - hovering either chart shows the frame's numbers and its approximate trace time
-- each hitch and overrun with its hot spots (own-time rise, source location, full call path) and a call tree
-- hitches grouped by top hot spot, the gains ranking by call path, and the run info
+- each hitch and overrun with its hot spots, each led by its source, with called by, working on and requested by, and the trimmed caller chain behind a dropdown
+- lifecycle phases and markers, and the run info
 
 ## Findings so far
 

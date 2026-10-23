@@ -19,7 +19,7 @@ def test_report_without_trace(tmp_path):
 
     html = write_report(tmp_path).read_text(encoding="utf-8")
     assert "<svg" in html and "budget 11.1 ms" in html
-    assert "No trace was analyzed for this run." in html
+    assert "Gains ranking" not in html
     assert html.count('data-chart="') == 2
     for n in range(1, len(result.hitches) + 1):
         assert f"H{n}" in html

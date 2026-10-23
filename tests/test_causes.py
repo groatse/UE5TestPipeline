@@ -122,22 +122,34 @@ def test_workers_count_only_when_bound_thread_waits_and_never_more_than_the_wait
     assert explain(not_waiting, medians, 1, resolver(), t).hotspots == []
 
 
-def test_gains_are_hot_spot_paths_capped_at_excess_and_skip_startup():
-    t = Thresholds(causes_skip_start_s=1.0, causes_ignore=("*Wait*",))
-    ms = [7.0] * 300
-    ms[50] = 30.0   # startup, at 0.5 s
-    ms[200] = 15.0  # gameplay: 3.9 ms over budget
-    frames = [Frame(i, i * 10.0, m, game_ms=m - 1, render_ms=2, rhi_ms=1, gpu_ms=2) for i, m in enumerate(ms)]
-    windows = [FrameWindow(i * 0.01, i * 0.01 + 0.01) for i in range(300)]
-    analysis = analyze(frames, t)
 
-    over_read, baseline = select_frames(frames, analysis, t)
-    per_frame = {i: {("game", ("Tick", "Work")): [1.0, 1.0]} for i in baseline}
-    per_frame[200] = {("game", ("Tick", "Work")): [9.0, 9.0]}
-    per_frame[50] = {("game", ("Tick", "Load")): [25.0, 25.0]}
-    report = compute_report(frames, analysis, per_frame, baseline, over_read, windows, resolver(), t)
 
-    assert report.non_gameplay_frames_over == 1 and report.frames_over == 1
-    gains = {tuple(g.path): g.credit_ms for g in report.gains}
-    assert gains[("Tick", "Work")] == pytest.approx(15.0 - 11.1)  # rise of 8 ms capped at the excess
-    assert ("Tick", "Load") not in gains
+def test_deferred_system_names_its_work_item_and_requester():
+    # H3 shape: Spawn Phase runs in Slate's pre-tick for an animation a widget asked for earlier.
+    t = load_thresholds()
+    loop = ("FEngineLoop::Tick", "Frame", "FrameTime", "Slate::Tick (Time and Widgets)", "Total Slate Tick Time", "PreTickEvent")
+    spawn = loop + ("Runner Flush", "Spawn Phase")
+    item = loop + ("Runner Flush", "Sequence Instance Update", "CounterFadeIn_INST")
+    req = ("FEngineLoop::Tick", "FTimerManager_Tick", "BP_GameModeLoadedDice_C", "Client_OnCountdownTick",
+           "ExecuteUbergraph_W_GameHUD", "PlayAnimationForward", "Widget::PlayAnimation")
+    paths = {("game", p[:n]): [12.0, 0.0] for p in (spawn,) for n in range(1, len(p))}
+    paths[("game", spawn)] = [12.0, 12.0]
+    paths[("game", item[:-1])] = [2.0, 0.0]
+    paths[("game", item)] = [2.0, 2.0]
+    for n in range(1, len(req)):
+        paths.setdefault(("game", req[:n]), [2.6, 0.0])
+    paths[("game", req)] = [2.6, 2.6]
+    r = resolver(assets={"W_GameHUD": "Content/UI/W_GameHUD.uasset"})
+    expl = explain(paths, {}, 1, r, t)
+
+    top = expl.hotspots[0]
+    assert top.path[-1] == "Spawn Phase"
+    how = {(tr.how, tr.name) for tr in top.triggered_by}
+    assert ("working on", "CounterFadeIn_INST") in how
+    assert ("requested by", "PlayAnimationForward") in how
+    requester = next(tr for tr in top.triggered_by if tr.how == "requested by")
+    assert "W_GameHUD" in requester.scope.source
+
+    # A hot spot inside a Blueprint's own call path names that Blueprint directly.
+    play = next(h for h in expl.hotspots if h.path[-1] == "Widget::PlayAnimation")
+    assert play.triggered_by[0].how == "called by" and play.triggered_by[0].name == "PlayAnimationForward"

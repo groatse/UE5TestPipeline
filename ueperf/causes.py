@@ -18,7 +18,7 @@ import fnmatch
 import re
 import statistics
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path as FsPath
 
 from ueperf.analyze import Analysis, frame_cost
@@ -38,6 +38,7 @@ from ueperf.source_index import SourceIndex, _enclosing_function
 PathKey = tuple[str, Path]  # (thread group, call path)
 
 OBJECT_RE = re.compile(r"^(Default__)?[A-Za-z]\w*_C(_\d+)?$")
+OWNER_KINDS = ("object", "blueprint", "uobject")
 MAX_TREE_NODES = 80
 MAX_CHILDREN = 6
 
@@ -71,6 +72,17 @@ class HotSpot:
     rise_ms: float
     scope: Scope
     callers: list[str] = field(default_factory=list)  # path above it, framework scopes trimmed
+    triggered_by: list["Trigger"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Trigger:
+    """The game class, Blueprint or object behind a hot spot in an engine system."""
+    how: str      # "called by" (in its own call path), "working on" (the system's work item),
+                  # or "requested by" (queued the work earlier in the frame)
+    name: str     # scope name as in the trace
+    scope: Scope
+    rise_ms: float
 
 
 @dataclass(frozen=True)
@@ -92,39 +104,14 @@ class Explanation:
     hotspot_share: float = 0.0
 
 
-@dataclass(frozen=True)
-class TimeRange:
-    frame: int
-    start_s: float
-    end_s: float
-    credit_ms: float
-
-
-@dataclass(frozen=True)
-class Gain:
-    thread: str
-    path: list[str]
-    scope: Scope
-    credit_ms: float
-    frames: int
-    worst: list[TimeRange]
-    callers: list[str] = field(default_factory=list)
-
-
-
-
 @dataclass
 class CauseReport:
     trace_offset_s: float
     frames_read: int
-    frames_over: int
-    non_gameplay_frames_over: int
-    skip_start_s: float
     baseline_frames: int
     hitch_windows: list[tuple[float, float] | None] = field(default_factory=list)
     hitches: list[Explanation] = field(default_factory=list)
     overruns: list[Explanation] = field(default_factory=list)
-    gains: list[Gain] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -340,6 +327,62 @@ def explain(
         hot = [HotSpot(h.thread, h.path, h.self_ms, h.baseline_ms, round(h.rise_ms * f, 3), h.scope, h.callers)
                if h.thread == "workers" else h for h in hot]
     hot.sort(key=lambda h: h.rise_ms, reverse=True)
+    hot = hot[:t.causes_top * 2]
+
+    # Who is behind each hot spot: a game class, Blueprint or object, when the hot
+    # spot itself is an engine system.
+    incl_rise = {k: v[0] - base(k)[0] for k, v in paths.items()}
+
+    def owners_in(group: str, path: Path, start: int = 0) -> list[tuple[Path, Scope]]:
+        """Owner scopes (Blueprint, object, UObject) on a path from `start` down, nearest to the leaf first."""
+        found = []
+        for depth in range(len(path) - 1, start - 1, -1):
+            sc = scope_of((group, path[:depth + 1]))
+            if sc.kind in OWNER_KINDS:
+                found.append((path[:depth + 1], sc))
+        return found
+
+    def triggers_for(h: HotSpot) -> list[Trigger]:
+        path = tuple(h.path)
+        out: list[Trigger] = []
+        # 1. Called by: the nearest owner above it in its own call path.
+        direct = [(p, sc) for p, sc in owners_in(h.thread, path[:-1]) if sc.kind != "uobject"]
+        if direct:
+            p, sc = direct[0]
+            out.append(Trigger("called by", p[-1], sc, round(incl_rise.get((h.thread, p), 0.0), 3)))
+            return out
+        # 2. Working on: owners under the same engine system scope in this frame,
+        #    i.e. the work items that system was processing.
+        system = next((d for d in range(len(path) - 2, -1, -1) if not is_ignored(path[d], t.causes_trim)), None)
+        if system is not None:
+            prefix = path[:system + 1]
+            items: dict[str, Trigger] = {}
+            for (g, p), r in incl_rise.items():
+                if g != h.thread or p[:len(prefix)] != prefix or r < t.causes_min_rise_ms:
+                    continue
+                for q, sc in owners_in(g, p, len(prefix)):
+                    name = q[-1]
+                    if sc.kind != "uobject" and (name not in items or r > items[name].rise_ms):
+                        items[name] = Trigger("working on", name, sc, round(r, 3))
+            out += sorted(items.values(), key=lambda x: x.rise_ms, reverse=True)[:3]
+        # 3. Requested by: for systems that run queued work, the owner above the scope
+        #    that queued it, anywhere in this frame.
+        for system_scope, patterns in t.causes_requesters.items():
+            if system_scope not in path:
+                continue
+            for (g, p), r in incl_rise.items():
+                if r >= t.causes_min_rise_ms and any(fnmatch.fnmatchcase(p[-1], pat) for pat in patterns):
+                    owner = next(((q, sc) for q, sc in owners_in(g, p[:-1]) if sc.kind != "uobject"), None)
+                    if owner:
+                        out.append(Trigger("requested by", owner[0][-1], owner[1], round(r, 3)))
+        seen, unique = set(), []
+        for tr in out:
+            if (tr.how, tr.name) not in seen:
+                seen.add((tr.how, tr.name))
+                unique.append(tr)
+        return unique[:5]
+
+    hot = [replace(h, triggered_by=triggers_for(h)) for h in hot]
 
     # Where the extra work was: the group with the largest own-time rise of real work.
     work = defaultdict(float)
@@ -379,7 +422,7 @@ def explain(
 
     wait_list = [Wait(g, name, round(r, 3)) for (g, name), r in waits.items() if r >= t.causes_min_rise_ms]
     wait_list.sort(key=lambda w: w.rise_ms, reverse=True)
-    return Explanation(tree=tree, hotspots=hot[:t.causes_top * 2], waits=wait_list[:3], trace_bound=trace_bound)
+    return Explanation(tree=tree, hotspots=hot, waits=wait_list[:3], trace_bound=trace_bound)
 
 
 # ---------------------------------------------------------------- report
@@ -436,61 +479,26 @@ def compute_report(
                     for o in analysis.overruns]
     hitch_windows = [window_for(windows, index_of[h.start_frame]) for h in analysis.hitches]
 
-    # Gains: hot-spot rise on each gameplay over-budget frame, scaled so a frame never
-    # gives out more credit than its excess, summed per path, scaled to all such frames.
-    gameplay = [analysis.is_gameplay(i, frames, t) for i in range(len(frames))]
-    gameplay_over = [i for i, f in enumerate(frames) if frame_cost(f) > t.budget_ms and gameplay[i]]
-    startup_over = analysis.summary.frames_over - len(gameplay_over)
-    read = [i for i in over_read if i in per_frame and i not in baseline and gameplay[i]]
-    scale = len(gameplay_over) / len(read) if read else 0.0
-
-    credit: dict[PathKey, float] = defaultdict(float)
-    scopes: dict[PathKey, Scope] = {}
-    callers: dict[PathKey, list[str]] = {}
-    hits: dict[PathKey, list[TimeRange]] = defaultdict(list)
-    for i in read:
-        excess = frame_cost(frames[i]) - t.budget_ms
-        expl = explain(per_frame[i], medians, 1, resolver, t, include_gpu=gpu_rose([i]))
-        total = sum(h.rise_ms for h in expl.hotspots)
-        f = min(1.0, excess / total) if total > 0 else 0.0
-        interval = window_for(windows, i)
-        for h in expl.hotspots:
-            key = (h.thread, tuple(h.path))
-            share = h.rise_ms * f
-            credit[key] += share
-            scopes[key] = h.scope
-            callers[key] = h.callers
-            if interval:
-                hits[key].append(TimeRange(frames[i].frame, round(interval[0], 6), round(interval[1], 6), round(share, 3)))
-
-    gains = [
-        Gain(thread, list(path), scopes[(thread, path)], round(total * scale, 3), len(hits[(thread, path)]),
-             sorted(hits[(thread, path)], key=lambda r: r.credit_ms, reverse=True)[:3], callers[(thread, path)])
-        for (thread, path), total in credit.items()
-    ]
-    gains.sort(key=lambda g: g.credit_ms, reverse=True)
-
     aligned = [(w.start_s - f.t_ms / 1000.0) for f, w in zip(frames, windows) if w is not None]
     return CauseReport(
         trace_offset_s=round(statistics.median(aligned), 6) if aligned else 0.0,
-        frames_read=len(read),
-        frames_over=len(gameplay_over),
-        non_gameplay_frames_over=startup_over,
-        skip_start_s=t.causes_skip_start_s,
+        frames_read=len([i for i in over_read if i in per_frame]),
         baseline_frames=len([i for i in baseline if i in per_frame]),
         hitch_windows=hitch_windows,
         hitches=hitch_expl,
         overruns=overrun_expl,
-        gains=gains[:25],
     )
 
 
 def select_frames(frames: list[Frame], analysis: Analysis, t: Thresholds) -> tuple[list[int], list[int]]:
-    """Which frames to read from the trace: (over budget, baseline)."""
+    """Which frames to read from the trace: (hitch and overrun frames, baseline)."""
     index_of = {f.frame: i for i, f in enumerate(frames)}
-    over = [i for i, f in enumerate(frames) if frame_cost(f) > t.budget_ms]
     hitch = {i for h in analysis.hitches for i in range(index_of[h.start_frame], index_of[h.end_frame] + 1)}
-    over_read = sorted(set(evenly(over, t.causes_max_frames)) | hitch)
+    overrun = []
+    for o in analysis.overruns:
+        lo, hi = index_of[o.start_frame], index_of[o.end_frame]
+        overrun += [i for i in range(lo, hi + 1) if frame_cost(frames[i]) > t.budget_ms]
+    over_read = sorted(set(evenly(overrun, t.causes_max_frames)) | hitch)
 
     in_budget = [i for i, f in enumerate(frames) if frame_cost(f) <= t.budget_ms and analysis.is_gameplay(i, frames, t)]
     # Keep away from the last frame, whose following tick may be missing.

@@ -9,7 +9,7 @@ from pathlib import Path
 from ueperf.ingest.frames import Frame, load_frames
 from ueperf.phases import NON_GAMEPLAY
 from ueperf.report.causes_html import STYLE as CAUSE_STYLE
-from ueperf.report.causes_html import gains_html, hitches_html, overruns_html
+from ueperf.report.causes_html import hitches_html, overruns_html
 
 CHART_W = 1100
 CHART_H = 260
@@ -316,7 +316,8 @@ def _loading_html(analysis) -> str:
     note = (f'Playable is the first frame that starts a {ld["window_s"]:g} s stretch with at most '
             f'{ld["max_share_over"]:.0%} of frames over budget and none over {ld.get("max_frame_ratio", 1.5):g}× the '
             'budget. Frames from the map load until then are the '
-            '<b>warmup</b> phase: shown in the chart and hitch list, but left out of baselines and the gains ranking.')
+            '<b>warmup</b> phase: shown in the chart, but no hitches or overruns are recorded there and they are left '
+            'out of baselines.')
     if ld["playable_frame"] is None:
         note = 'The frame rate never became steady in this run, so there is no playable time. ' + note
     return ('<h2>Loading</h2><div class="tiles">' + "".join(
@@ -362,12 +363,13 @@ def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str 
 
     trace_note = ""
     if causes:
-        trace_note = (f'<p class="note">Each hitch lists the scopes whose <b>own</b> time rose above their usual cost '
-                      f'on {causes["baseline_frames"]} in-budget frames: the time spent in that scope itself, not in '
-                      'instrumented scopes below it. Each row leads with the source to open; the callers dropdown shows '
-                      'how it was reached, with framework scopes such as the engine loop left out. The full call tree '
-                      'appears only when no few scopes explain the stall. Trace times are on the Insights clock, about '
-                      f'{causes["trace_offset_s"]:.3f} s ahead of run time.</p>')
+        trace_note = (f'<p class="note">Hitches are recorded only once the game is playable. Each lists the scopes '
+                      f'whose <b>own</b> time rose above their usual cost on {causes["baseline_frames"]} in-budget frames, '
+                      'led by the source to open. When the scope is an engine system, <b>called by</b>, '
+                      '<b>working on</b> and <b>requested by</b> name the game class, Blueprint or object behind it. '
+                      'The callers dropdown shows how it was reached, without framework scopes such as the engine loop. '
+                      'The full call tree appears only when no few scopes explain the stall. Trace times are on the '
+                      f'Insights clock, about {causes["trace_offset_s"]:.3f} s ahead of run time.</p>')
 
     sections = [
         f'<h1>{_e(name)}</h1>',
@@ -380,14 +382,6 @@ def render_report(run: Path, analysis: dict, frames: list[Frame], run_info: str 
         '<h2>Hitches</h2>', trace_note, hitches_html(analysis, causes),
         '<h2>Sustained overruns</h2>', overruns_html(analysis, causes),
     ]
-    if causes:
-        sections += ['<h2>Gains ranking</h2>',
-                     f'<p class="note">Hot spots across {causes["frames_read"]} of {causes["frames_over"]} gameplay '
-                     'over-budget frames: each one\'s own rise over its usual cost, scaled so a frame never gives out more '
-                     f'than its excess, summed over the run. {causes["non_gameplay_frames_over"]} over-budget frames '
-                     'during startup or loading are left out.</p>', gains_html(causes)]
-    else:
-        sections += ['<h2>Gains ranking</h2>', '<p class="note">No trace was analyzed for this run.</p>']
     if run_info:
         sections += ['<h2>Run info</h2>', f'<pre>{_e(run_info)}</pre>']
 

@@ -30,6 +30,7 @@ class Thresholds:
     causes_ignore: tuple[str, ...] = field(default_factory=tuple)
     causes_trim: tuple[str, ...] = field(default_factory=tuple)
     causes_tree_below_share: float = 0.5
+    causes_requesters: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def load_thresholds(path: Path | None = None, budget_ms: float | None = None) -> Thresholds:
@@ -70,4 +71,5 @@ def load_thresholds(path: Path | None = None, budget_ms: float | None = None) ->
         causes_ignore=tuple(causes.get("ignore", defaults.causes_ignore)),
         causes_trim=tuple(causes.get("trim", defaults.causes_trim)),
         causes_tree_below_share=float(causes.get("tree_below_share", defaults.causes_tree_below_share)),
+        causes_requesters={k: tuple(v) for k, v in causes.get("requesters", {}).items()},
     )

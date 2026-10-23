@@ -271,11 +271,19 @@ def analyze(
     playable_index = next((i for i, f in enumerate(frames) if f.frame == loading.playable_frame), len(frames))
     frame_phases = [WARMUP if i < playable_index and p not in NON_GAMEPLAY else p for i, p in enumerate(frame_phases)]
     index_of = {f.frame: i for i, f in enumerate(frames)}
+
+    # Hitches and overruns count only once the game is playable: before that the level
+    # is still loading and streaming in, and slow frames there are loading, not hitches.
+    def playable(item) -> bool:
+        return frame_phases[index_of[item.start_frame]] not in NON_GAMEPLAY
+
+    overruns = [o for o in find_overruns(frames, t) if playable(o)]
+    hitches = [h for h in find_hitches(frames, t) if playable(h)]
     return Analysis(
         loading=loading,
         summary=summarize(frames, t),
-        overruns=[_with_context(o, index_of, frame_phases, markers) for o in find_overruns(frames, t)],
-        hitches=[_with_context(h, index_of, frame_phases, markers) for h in find_hitches(frames, t)],
+        overruns=[_with_context(o, index_of, frame_phases, markers) for o in overruns],
+        hitches=[_with_context(h, index_of, frame_phases, markers) for h in hitches],
         markers=markers,
         phases=summarize_phases(frames, frame_phases, t) if frames else [],
         frame_phases=frame_phases,

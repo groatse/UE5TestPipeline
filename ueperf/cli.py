@@ -54,12 +54,19 @@ def _scope_text(scope) -> str:
     return f"[{KIND_LABEL.get(scope.kind, scope.kind)}] {where}{more}"
 
 
+def _trigger_text(tr) -> str:
+    where = f" ({tr.scope.source})" if tr.scope.source else ""
+    return f"{tr.how} {tr.name}{where}"
+
+
 def _print_explanation(expl, indent: str = "    ") -> None:
     if not expl.tree and not expl.hotspots:
         print(f"{indent}no scope rose above its baseline")
     for h in expl.hotspots[:8]:
         print(f"{indent}+{h.rise_ms:6.2f} ms  {h.scope.source or 'no source location'}")
         print(f"{indent}           scope {h.path[-1]} [{KIND_LABEL.get(h.scope.kind, h.scope.kind)}] on {h.thread}")
+        for tr in h.triggered_by:
+            print(f"{indent}           {_trigger_text(tr)}")
         if h.callers:
             print(f"{indent}           called from: {' > '.join(h.callers)}")
     for w in expl.waits:
@@ -74,8 +81,7 @@ def _print_explanation(expl, indent: str = "    ") -> None:
 
 
 def _print_causes(result: Analysis, report: CauseReport) -> None:
-    print(f"\nTrace: {report.frames_read} of {report.frames_over} gameplay over-budget frames read "
-          f"({report.non_gameplay_frames_over} more during startup or loading),{report.baseline_frames} baseline frames, "
+    print(f"\nTrace: {report.frames_read} hitch and overrun frames read, {report.baseline_frames} baseline frames, "
           f"trace clock +{report.trace_offset_s:.3f} s")
 
     for n, (h, expl, window) in enumerate(zip(result.hitches, report.hitches, report.hitch_windows), 1):
@@ -87,14 +93,6 @@ def _print_causes(result: Analysis, report: CauseReport) -> None:
     for n, (o, expl) in enumerate(zip(result.overruns, report.overruns), 1):
         print(f"\nO{n}: frames {o.start_frame}-{o.end_frame}, per frame on average")
         _print_explanation(expl)
-
-    print("\nGains ranking (over-budget time each hot spot accounts for):")
-    for n, g in enumerate(report.gains[:15], 1):
-        where = ", ".join(f"{r.start_s:.3f} s" for r in g.worst)
-        print(f"  {n:>2}. {g.credit_ms:8.2f} ms  {g.scope.source or 'no source location'}")
-        print(f"      scope {g.path[-1]} on {g.thread}; {g.frames} frames, worst at {where}")
-        if g.callers:
-            print(f"      called from: {' > '.join(g.callers)}")
 
 
 def _print_loading(result: Analysis) -> None:

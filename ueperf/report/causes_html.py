@@ -1,4 +1,4 @@
-"""Report sections that explain hitches, overruns and gains as call paths."""
+"""Report sections that explain hitches and overruns as hot spots with their source and triggers."""
 
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ details > summary { cursor: pointer; color: var(--text-secondary); font-size: 13
 ol.callers { margin: 2px 0 4px; padding-left: 22px; font: 12px/1.5 ui-monospace, Consolas, monospace; color: var(--text-secondary); }
 ol.callers li.bp { color: var(--series-2); }
 td details > summary { font-size: 12px; margin: 4px 0 0; }
+.trigger { font-size: 13px; margin: 3px 0 0; }
+.trigger .how { display: inline-block; min-width: 92px; color: var(--text-secondary); font-size: 12px; }
+.trigger b { color: var(--series-2); }
 """
 
 
@@ -80,12 +83,24 @@ def callers_html(callers: list[str]) -> str:
     return f'<details><summary>called from ({len(callers)})</summary><ol class="callers">{items}</ol></details>'
 
 
+def triggers_html(triggers: list[dict]) -> str:
+    """The game class, Blueprint or object behind an engine-system hot spot."""
+    if not triggers:
+        return ""
+    items = []
+    for tr in triggers:
+        where = f' <span class="src">{_e(tr["scope"]["source"])}</span>' if tr["scope"].get("source") else ""
+        items.append(f'<div class="trigger"><span class="how">{_e(tr["how"])}</span> <b>{_e(tr["name"])}</b>{where}</div>')
+    return "".join(items)
+
+
 def _hotspot_table(hotspots: list[dict]) -> str:
     if not hotspots:
         return '<p class="note">No scope\'s own time rose above its baseline.</p>'
     rows = "".join(
         f'<tr><td class="n">+{h["rise_ms"]:.2f}</td><td class="n">{h["baseline_ms"]:.2f}</td>'
-        f'<td>{source_first(h["scope"], h["path"][-1], h["thread"])}{callers_html(h.get("callers", []))}</td></tr>'
+        f'<td>{source_first(h["scope"], h["path"][-1], h["thread"])}{triggers_html(h.get("triggered_by", []))}'
+        f'{callers_html(h.get("callers", []))}</td></tr>'
         for h in hotspots)
     return ('<div class="scroll"><table><thead><tr><th class="n">Own rise ms</th><th class="n">Usual ms</th>'
             '<th>Source, scope and callers</th></tr></thead>'
@@ -161,18 +176,5 @@ def overruns_html(analysis: dict, causes: dict | None) -> str:
                 'times are per frame, averaged' + _context(o))
         out.append(explanation_html(f"O{n}", meta, causes["overruns"][n - 1] if causes else None))
     return "".join(out)
-
-
-def gains_html(causes: dict) -> str:
-    if not causes["gains"]:
-        return '<p class="note">No over-budget gameplay frames, so there is nothing to rank.</p>'
-    rows = "".join(
-        f'<tr><td class="n">{n}</td><td class="n">{g["credit_ms"]:.2f}</td><td class="n">{g["frames"]}</td>'
-        f'<td>{source_first(g["scope"], g["path"][-1], g["thread"])}{callers_html(g.get("callers", []))}</td>'
-        f'<td class="n">{", ".join("%.3f" % r["start_s"] for r in g["worst"])}</td></tr>'
-        for n, g in enumerate(causes["gains"], 1))
-    return ('<div class="scroll"><table><thead><tr><th class="n">#</th><th class="n">Over-budget ms</th>'
-            '<th class="n">Frames</th><th>Source, scope and callers</th><th class="n">Worst at, trace s</th>'
-            f'</tr></thead><tbody>{rows}</tbody></table></div>')
 
 

@@ -101,3 +101,10 @@ trim = [
 # share of a hitch's stall, i.e. when the time is spread over many scopes and
 # no single one is the answer.
 tree_below_share = 0.5
+
+# Engine systems that run work queued earlier in the frame, and the scopes that
+# queue it. A hot spot under one of these scopes names the Blueprint or object
+# above a matching scope elsewhere in the same frame as "requested by".
+[causes.requesters]
+"Runner Flush" = ["Widget::PlayAnimation*", "UUMGSequencePlayer*", "*PlaySequence*"]
+"Slate::Prepass" = ["*SetText*", "*SetVisibility*", "*AddChild*", "*CreateWidget*"]

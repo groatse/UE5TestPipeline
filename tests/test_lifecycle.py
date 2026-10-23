@@ -77,3 +77,13 @@ def test_playable_after_load_spikes_and_warmup_before_it():
     assert ld.launch_to_playable_s == pytest.approx(3.0 + 0.61)
     assert ld.map_loaded_to_playable_s == pytest.approx(0.61 - 0.3)
     assert result.frame_phases[:61] == ["warmup"] * 61 and result.frame_phases[61] == "in_map"
+
+
+def test_no_hitches_before_the_game_is_playable():
+    ms = [7.0] * 600
+    ms[30] = 40.0    # while the level is still settling: not a hitch
+    ms[400] = 30.0   # once playable: a hitch
+    frames = [Frame(i, i * 10.0, m, m - 1, 1, 1, 1) for i, m in enumerate(ms)]
+    markers = [Marker(0, 0.0, "map_load_start"), Marker(0, 1.0, "map_load_end")]
+    result = analyze(frames, Thresholds(), markers, {"map_load_start": "loading", "map_load_end": "in_map"})
+    assert [h.start_frame for h in result.hitches] == [400]
